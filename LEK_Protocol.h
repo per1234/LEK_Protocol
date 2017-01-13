@@ -19,10 +19,11 @@ enum ScriptStorageLocation {
 
 enum GatewayConsoleState
 {
+    kSTATE_MAIN_MENU,
     kSTATE_SCANNING,
     kSTATE_PAIRING,
-    kSTATE_RECEIVING,
-    kSTATE_NOMINAL
+    kSTATE_RECEIVING
+    
 };
 
 enum UtilityCallbackDefinition 
@@ -179,8 +180,14 @@ class LEK_Protocol {
   uint16_t _tick_rate;
   uint64_t _uptime_ticks;
   int8_t _last_rssi;
+  
+  GatewayConsoleState _console_state;
+  GatewayConsoleState _last_console_state;
+  String _console_buffer;
+  
   EventCallbackFunction _event_callbacks[LEK_NUMBER_OF_EVENT_CALLBACKS];
   EventType _registered_events[LEK_NUMBER_OF_REGISTERABLE_EVENTS];
+  
   RH_RF95 *_rf_module;
 
   /* Statically allocated buffers, you say? */

@@ -22,6 +22,10 @@
 #define LEK_DEFAULT_SERIAL_BAUD_RATE	9600
 #define LEK_DEFAULT_SERIAL_TIMEOUT		1500
 #define LEK_NUMBER_OF_EVENT_CALLBACKS	4
+/* With the console buffer set at this length, we could stuff the maximum length of a line x2.
+But, we could not stuff an entire script (4096), as that would be fairly ridiculous to pull off
+in a single command... */
+#define LEK_MAX_CONSOLE_BUFFER			512
 
 /* Ducky script root list! */
 
@@ -118,6 +122,14 @@ reset - soft-reset system
 #define LEK_MAX_SCRIPT_LINES			32
 #define LEK_SCRIPT_MAP_SIZE				64
 #define LEK_SCRIPT_STORAGE_SLOTS		5
+
+/* Parameters */
+//Mode
+//Network Address
+//Events
+//Node Name
+//UUID
+//Beacon Rate
 
 /* 
   EEPROM Map

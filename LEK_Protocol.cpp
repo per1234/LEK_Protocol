@@ -226,12 +226,45 @@ void LEK_Protocol::rfmWaitForAck(){
   }
 }
 
+/* If we've got a line that the user is typing, we should display it here... */
 void LEK_Protocol::displayConsole(){
-  
+  this->clearTerminal();
+  //Display system information here?
+  Serial.print(">");
+  //Display buffered serial command line depending on the state... _console_buffer
+  switch (_console_state) 
+  {
+    case kSTATE_MAIN_MENU:
+      if (_last_console_state != kSTATE_MAIN_MENU){
+        _last_console_state = kSTATE_MAIN_MENU;
+      }
+      break;
+    case kSTATE_SCANNING:
+      if (_last_console_state != kSTATE_SCANNING){
+        _last_console_state = kSTATE_SCANNING;
+      } 
+      break;
+    case kSTATE_PAIRING:
+      if (_last_console_state != kSTATE_PAIRING){
+        _last_console_state = kSTATE_PAIRING;
+      } 
+      break;
+    case kSTATE_RECEIVING:
+      if (_last_console_state != kSTATE_RECEIVING){
+        _last_console_state = kSTATE_RECEIVING;
+      } 
+      break;
+    default:
+      //Unknown console state? We should drop back into the main menu...
+      break;
+  }
+
 }
 
-void LEK_Protocol::updateConsoleState(){
-
+void LEK_Protocol::updateConsoleState(GatewayConsoleState state){
+  /* Save the last console state so we can perform certain actions on state transitions... */
+  _last_console_state = _console_state;
+  _console_state = state;
 }
 
 void LEK_Protocol::clearTerminal(){
