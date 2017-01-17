@@ -3,7 +3,17 @@
 
 #include <RH_RF95.h>
 #include <elapsedMillis.h>
+#include <QueueList.h>
 #include "LEK_Protocol_Definitions.h"
+
+/*
+Style Guide: 
+Typedefs, and Enums: Leading capital CamelCase. Enums start with a lowercase k.
+Defines: All capitals, underscores as spaces. All defines are prefixed with LEK_.
+Functions: Leading lowercase camelCase.
+Vars: All lowercase, underscores as spaces.
+Global vars: Same as vars, but with a leading underscore.
+*/
 
 enum DeviceMode {
     kGATEWAY_SLAVE,
@@ -19,11 +29,18 @@ enum ScriptStorageLocation {
 
 enum GatewayConsoleState
 {
-    kSTATE_MAIN_MENU,
-    kSTATE_SCANNING,
-    kSTATE_PAIRING,
-    kSTATE_RECEIVING
-    
+    kCONSOLE_STATE_MAIN_MENU,
+    kCONSOLE_STATE_SCANNING,
+    kCONSOLE_STATE_PAIRING,
+    kCONSOLE_STATE_RECEIVING,
+    kCONSOLE_STATE_CLOSED
+};
+
+enum ReceiverReceiveState
+{
+    kRECEIVER_STATE_NOMINAL,
+    kRECEIVER_STATE_SCRIPT_PACK,
+
 };
 
 enum UtilityCallbackDefinition 
@@ -69,8 +86,10 @@ typedef struct {
     uint8_t storage_position;
     uint8_t lines;
     uint8_t line_sizes[LEK_MAX_SCRIPT_LINES];
+    uint8_t line_commands[LEK_MAX_SCRIPT_LINES];
 } ScriptMap;
 
+/* TODO: This is very C... And, it could probably be made more C++y. */
 String getNodeName(uint8_t *packet, uint8_t node_name_length, uint8_t index);
 uint8_t getUnsigned8(uint8_t *packet, uint8_t index);
 int8_t getSigned8(uint8_t *packet, uint8_t index);
@@ -93,7 +112,8 @@ void signalFastBlink();
 uint8_t *decryptIncomingPacket();
 uint8_t *encryptOutgoingPacket(uint8_t packet[]);
 
-/* Keyboard and Mouse Reduction Functions */
+/* Keyboard and Mouse Reduction Functions -- Refactor: Does not adhere to style guide. Needs some cleanup
+and modularization. Maybe, roll into an Attack class? */
 void k(int key);
 void mod(int mod, int key);
 void ctrl(int key);
@@ -116,14 +136,10 @@ class LEK_Protocol {
   ~LEK_Protocol();
   void begin();
   void spin();
-  
-  void rfmReset();
-  void rfmSetup();
-  void rfmSendPacket(const uint8_t *packet, uint8_t packet_length);
-  void rfmReadPacket();
 
   void displayConsole();
-  void updateConsoleState();
+  void updateConsoleState(GatewayConsoleState state);
+  void clearTerminal();
 
   void reloadParametersFromEEPROM();
 
@@ -155,19 +171,52 @@ class LEK_Protocol {
   uint8_t *createBeacon(DeviceMode _mode, const char* _node_name, uint8_t _network_address, uint32_t _uptime_ticks, uint8_t _software_version);
   uint8_t *createSendKey(uint16_t message_sequence, uint8_t key);
   uint8_t *createSendModKey(uint16_t message_sequence, uint8_t mod_key, uint8_t key);
-  uint8_t *createOsXDriveByRequest(uint16_t message_sequence);
-  uint8_t *createWindowsDriveByRequest(uint16_t message_sequence);
-  int determinePacketSize(const uint8_t *packet, size_t absolute_packet_size);
+  uint8_t *createExecuteBakedRoutine(uint16_t message_sequence, uint8_t routine_index);
+  int determinePacketLength(const uint8_t *packet, size_t absolute_packet_size);
+  bool validatePacket(const uint8_t *packet, size_t absolute_packet_size)
   void printPacketASCII(const uint8_t *packet, size_t absolute_packet_size);
-
-  void setSystemTime(byte seconds, byte minutes, byte hours, byte day, byte month, byte year);
-  uint64_t getSystemTime(void);
   uint32_t generateMessageSalt();
   uint32_t generateCurrentTime();
 
+  void manageTransactions();
+  void openTransaction();
+  void closeTransaction();
+
+  /* This could use a refactoring to something a bit less cumbersome... */
+  void routePacketToHandler(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerBeaconPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerGatewayStatusResponsePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerAckPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerNackPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerScriptPackConcludePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerScheduleResponsePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerEventPollConfigurationResponsePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerRevShellCompletePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerKeyPressPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerModifierPressPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerLinePressPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerMouseMovePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerSetTimePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerPackLinePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerPackScriptPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerScheduleScriptPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerStatusRequestPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerSetEventTriggerPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerClearLoadsPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerResetPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerScuttlePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerScheduleRequestPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerExecuteBakedRoutinePacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerNopPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerUsbMuxCtlPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void handlerUsbSlavePowerCtlPacket(const uint8_t *packet, size_t absolute_packet_size);
+
+  void setSystemTime(byte seconds, byte minutes, byte hours, byte day, byte month, byte year);
+  uint64_t getSystemTime(void);
+
   /* This ticker will overflow in 49.1 days if it's not cycled off into another variable at another rate. */
-  elapsedMillis _uptime_ticks_actual;
-  elapsedMillis _beacon_ticks;
+  elapsedMillis uptime_ticks_actual;
+  elapsedMillis beacon_ticks;
 
  private:
   DeviceMode _mode;
@@ -177,9 +226,13 @@ class LEK_Protocol {
   uint64_t _uuid;
   char _node_name[LEK_MAX_NODE_NAME+1];
   bool _beaconing;
+  bool _radio_state;
+
+  /* Statistics */
   uint16_t _tick_rate;
   uint64_t _uptime_ticks;
   int8_t _last_rssi;
+  uint16_t _count_of_failed_packet_receives;
   
   GatewayConsoleState _console_state;
   GatewayConsoleState _last_console_state;
@@ -189,10 +242,21 @@ class LEK_Protocol {
   EventType _registered_events[LEK_NUMBER_OF_REGISTERABLE_EVENTS];
   
   RH_RF95 *_rf_module;
+  QueueList<uint8_t*> _packet_buffer;
+  /* Protocol Controls */
+  uint8_t _beacons_nearby[LEK_MAX_BEACONS_NEARBY];
+  uint8_t _count_of_beacons_nearby;
 
   /* Statically allocated buffers, you say? */
   char _temp_script[LEK_MAX_SCRIPT_SIZE];
 
+  void rfmReset();
+  void rfmSetup();
+  void rfmSendPacket(const uint8_t *packet, uint8_t packet_length);
+  void rfmReadPacket();
+  /* This function puts the packet into the packet queue */
+  bool rfmReadRadioState();
+  void rfmSetRadioState(bool radio_state)
 };
 
 #endif /* _LEK_PROTOCOL_H_ */

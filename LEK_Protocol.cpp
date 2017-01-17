@@ -17,7 +17,7 @@
 #include <limits.h>
 #include <Keyboard.h>
 #include <Mouse.h>
-//#include <EEPROM.h>
+#include <EEPROM.h>
 #include <RH_RF95.h>
 #include <elapsedMillis.h>
 
@@ -33,7 +33,7 @@
 */
 
 
-//I currently extremely dislike this section of the code...
+//TODO: I currently extremely dislike this section of the code...
 LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, uint64_t user_uuid, const char* user_node_name, bool user_beaconing)
   {
   SPI.begin();
@@ -119,13 +119,16 @@ void LEK_Protocol::begin() {
 
 void LEK_Protocol::spin(){
   /* Run routine events:
+    Check if there is a queued script to run (this interrupts all other execution)
+    Check if radio state has changed, if so disable radio
     Check for incoming radio packet
     Copy to incoming radio packet FIFO
-    Check timer ticks for event triggers
-    Check RTC ticks for event triggers
     Drain one message from incoming radio packet FIFO
       Authenticate packet from FIFO
       Parse packet pulled from FIFO
+      If message requires spin hotwire, then execute respin
+    Check timer ticks for event triggers
+    Check RTC ticks for event triggers
     Check for incoming serial message
     Parse incoming serial message
       Acknowledge the user's command
@@ -169,61 +172,35 @@ void LEK_Protocol::rfmReset(){
 }
 
 void LEK_Protocol::rfmReadPacket(){
-  if (RFModule.available()){
+  if (_rf_module->available()){
     // Should be a message for us now   
     uint8_t buf[RH_RF95_MAX_MESSAGE_LEN] = { 0 };
     uint8_t len = sizeof(buf);
     
     /* This will block for a short time if the packet is not "complete" */
-    if (RFModule.recv(buf, &len)){
-      digitalWrite(LINK_LED_PIN, HIGH);
-      RH_RF95::printBuffer("Received: ", buf, len);
-      Serial.print("RSSI: ");
-      Serial.println(RFModule.lastRssi(), DEC);
-      
-      /* ACK on introduction into the processing FIFO? Or after parsing? */
-      uint8_t data[] = "And hello back to you";
-      RFModule.send(data, sizeof(data));
-      RFModule.waitPacketSent();
-      Serial.println("Sent a reply");
-      digitalWrite(LINK_LED_PIN, LOW);
+    if (_rf_module->recv(buf, &len)){
+      //Add to packet QueueList
+      //Submit a request to blink link LED
     } else {
-      Serial.println("Receive failed");
+      _count_of_failed_packet_receives++;
     }
   }
 
+}
+
+/* If it's low, the radio is off. Reset pin is active low... */
+bool LEK_Protocol::rfmReadRadioState(){
+  return digitalRead(LEK_RFM_RESET_PIN);
+}
+
+void LEK_Protocol::rfmSetRadioState(bool radio_state){
+  digitalWrite(LEK_RFM_RESET_PIN);
 }
 
 void LEK_Protocol::rfmSendPacket(const uint8_t *packet, uint8_t packet_length){
-  digitalWrite(LINK_LED_PIN, HIGH);
-  RFModule.send(packet, packet_length);
-  delay(10);
-  RFModule.waitPacketSent();
-  digitalWrite(LINK_LED_PIN, LOW);
-}
-
-void LEK_Protocol::rfmWaitForAck(){
-  // Now wait for a reply
-  uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-  uint8_t len = sizeof(buf);
- 
-  Serial.println("Waiting for reply..."); delay(10);
-  if (RFModule.waitAvailableTimeout(1000)){ 
-    // Should be a reply message for us now   
-    if (RFModule.recv(buf, &len)){
-      /*Serial.print("Got reply: ");
-      Serial.println((char*)buf);
-      Serial.print("RSSI: ");
-      Serial.println(RFModule.lastRssi(), DEC);*/
-      //Maybe we'd like to do something with this value without it getting stomped by the RH library...*/
-      _last_rssi = _rf_module.lastRssi();
-
-    } else {
-      Serial.println("Receive failed");
-    }
-  } else {
-    Serial.println("No reply, is there a listener around?");
-  }
+  _rf_module->send(packet, packet_length);
+  _rf_module->waitPacketSent();
+  //Submit a request to blink link LED
 }
 
 /* If we've got a line that the user is typing, we should display it here... */
@@ -234,24 +211,24 @@ void LEK_Protocol::displayConsole(){
   //Display buffered serial command line depending on the state... _console_buffer
   switch (_console_state) 
   {
-    case kSTATE_MAIN_MENU:
-      if (_last_console_state != kSTATE_MAIN_MENU){
-        _last_console_state = kSTATE_MAIN_MENU;
+    case kCONSOLE_STATE_MAIN_MENU:
+      if (_last_console_state != kCONSOLE_STATE_MAIN_MENU){
+        _last_console_state = kCONSOLE_STATE_MAIN_MENU;
       }
       break;
-    case kSTATE_SCANNING:
-      if (_last_console_state != kSTATE_SCANNING){
-        _last_console_state = kSTATE_SCANNING;
+    case kCONSOLE_STATE_SCANNING:
+      if (_last_console_state != kCONSOLE_STATE_SCANNING){
+        _last_console_state = kCONSOLE_STATE_SCANNING;
       } 
       break;
-    case kSTATE_PAIRING:
-      if (_last_console_state != kSTATE_PAIRING){
-        _last_console_state = kSTATE_PAIRING;
+    case kCONSOLE_STATE_PAIRING:
+      if (_last_console_state != kCONSOLE_STATE_PAIRING){
+        _last_console_state = kCONSOLE_STATE_PAIRING;
       } 
       break;
-    case kSTATE_RECEIVING:
-      if (_last_console_state != kSTATE_RECEIVING){
-        _last_console_state = kSTATE_RECEIVING;
+    case kCONSOLE_STATE_RECEIVING:
+      if (_last_console_state != kCONSOLE_STATE_RECEIVING){
+        _last_console_state = kCONSOLE_STATE_RECEIVING;
       } 
       break;
     default:
@@ -368,6 +345,17 @@ uint8_t LEK_Protocol::rtcTicksEvent(){
 uint8_t LEK_Protocol::serialInterfaceReceiveEvent(){
     /* Check if a callback function is registered to this event */
 }
+
+
+/* 
+*
+*
+*
+* Protocol Functions
+*
+*
+*
+*/
 
 /* Broken */
 /* The receiver responds with it's event poll configuration when it is requested */
@@ -504,27 +492,17 @@ uint8_t *LEK_Protocol::createSendModKey(uint16_t message_sequence, uint8_t mod_k
   return packet;
 }
 
-uint8_t *LEK_Protocol::createOsXDriveByRequest(uint16_t message_sequence){
+uint8_t *LEK_Protocol::createExecuteBakedRoutine(uint16_t message_sequence, uint8_t routine_index);{
   uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_EXECUTE_OS_X_REVSHELL);    
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_EXECUTE_BAKED_ROUTINE);    
   putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
   putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, LEK_RESERVED_BYTE);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, routine_index);
   putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
   return packet;
 }
 
-uint8_t *LEK_Protocol::createWindowsDriveByRequest(uint16_t message_sequence){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_EXECUTE_WINDOWS_REVSHELL);    
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, LEK_RESERVED_BYTE);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-int LEK_Protocol::determinePacketSize(const uint8_t *packet, size_t absolute_packet_size){
+int LEK_Protocol::determinePacketLength(const uint8_t *packet, size_t absolute_packet_size){
   /* Searches from the tail of the packet... */
   for (int i = absolute_packet_size; i > 0; i--){
     if (packet[i] == LEK_RESERVED_MESSAGE_TERMINATOR){
@@ -532,6 +510,11 @@ int LEK_Protocol::determinePacketSize(const uint8_t *packet, size_t absolute_pac
     }
   }
   return -1;  
+}
+
+bool LEK_Protocol::validatePacket(const uint8_t *packet, size_t absolute_packet_size){
+  //Use CRC16 to validate packet contents
+
 }
 
 void LEK_Protocol::printPacketASCII(const uint8_t *packet, size_t absolute_packet_size){
@@ -559,6 +542,211 @@ uint32_t LEK_Protocol::generateMessageSalt(){
 uint32_t LEK_Protocol::generateCurrentTime(){
    /* Some fancy logic to grab the value from the RTC here.  */
    return 0xFFFFFFFF;
+}
+
+void manageTransactions(){
+
+}
+
+void openTransaction(){
+
+}
+
+void closeTransaction(){
+  
+}
+
+void routePacketToHandler(const uint8_t *packet, size_t absolute_packet_size){
+  /* The packet is validated via CRC16 before reaching this, so it's "safe" to assume good data. */
+  switch (packet[0]) 
+  {
+    case LEK_RECEIVER_BEACON:
+      handlerBeaconPacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_BEACON:
+      handlerBeaconPacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_STATUS_RESPONSE:
+      handlerGatewayStatusResponsePacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_ACK:
+      handlerAckPacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_NACK:
+      handlerNackPacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_SCRIPT_PACK_CONCLUDE:
+      handlerScriptPackConcludePacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_SCHEDULE_RESPONSE:
+      handlerScheduleResponsePacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_EVENT_POLL_CONFIGURATION_RESPONSE:
+      handlerEventPollConfigurationResponsePacket(packet, absolute_packet_size);
+      break;
+    case LEK_GATEWAY_REVSHELL_COMPLETE:
+      handlerRevShellCompletePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_KEY_PRESS:
+      handlerKeyPressPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_MODIFIER_PRESS:
+      handlerModifierPressPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_LINE_PRESS:
+      handlerLinePressPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_MOUSE_MOVE:
+      handlerMouseMovePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_SET_TIME:
+      handlerSetTimePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_PACK_LINE:
+      handlerPackLinePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_PACK_SCRIPT:
+      handlerPackScriptPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_SCHEDULE_SCRIPT:
+      handlerScheduleScriptPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_STATUS_REQUEST:
+      handlerStatusRequestPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_SET_EVENT_TRIGGER:
+      handlerSetEventTriggerPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_CLEAR_LOADS:
+      handlerClearLoadsPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_RESET:
+      handlerResetPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_SCUTTLE:
+      handlerScuttlePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_SCHEDULE_REQUEST:
+      handlerScheduleRequestPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_EXECUTE_BAKED_ROUTINE:
+      handlerExecuteBakedRoutinePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_NOP:
+      handlerNopPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_USB_MUX_CTL:
+      handlerUsbMuxCtlPacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_USB_SLAVE_POWER_CTL:
+      handlerUsbSlavePowerCtlPacket(packet, absolute_packet_size);
+      break;
+    default:
+      //Unknown packet? NACK?
+      break;
+  }  
+}
+
+void handlerBeaconPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerGatewayStatusResponsePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerAckPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerNackPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerScriptPackConcludePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerScheduleResponsePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerEventPollConfigurationResponsePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+void handlerRevShellCompletePacket(const uint8_t *packet, size_t absolute_packet_size){
+} 
+
+void handlerKeyPressPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerModifierPressPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerLinePressPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerMouseMovePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerSetTimePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerPackLinePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerPackScriptPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerScheduleScriptPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerStatusRequestPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerSetEventTriggerPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerClearLoadsPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerResetPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerScuttlePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerScheduleRequestPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerExecuteBakedRoutinePacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerNop(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerUsbMuxCtlPacket(const uint8_t *packet, size_t absolute_packet_size){
+
+}
+
+void handlerUsbSlavePowerCtlPacket(const uint8_t *packet, size_t absolute_packet_size){
+
 }
 
 /* 
