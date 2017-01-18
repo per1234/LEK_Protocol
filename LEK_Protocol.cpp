@@ -17,7 +17,6 @@
 #include <limits.h>
 #include <Keyboard.h>
 #include <Mouse.h>
-#include <EEPROM.h>
 #include <RH_RF95.h>
 #include <elapsedMillis.h>
 
@@ -57,7 +56,8 @@ LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, u
 
   _global_sequence = 0;
   _network_address = user_network_address;
-  _uuid = user_uuid;
+  /* TODO: strncpy to the _uuid array */
+  //_uuid = user_uuid;
   /* copy user name to node name - strncpy limited to size of buffer */
   _node_name[LEK_MAX_NODE_NAME] = { 0 };
   _beaconing = user_beaconing;
@@ -103,6 +103,14 @@ LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, u
     /* No (or incorrect) mode  selected, cannot continue. Fall back into console mode. */
     signalFastBlink();
   }
+
+  /* If the unit is in console mode, it will spin and wait for the user's Serial connection
+  to attach... */
+  if (user_mode == kGATEWAY_CONSOLE){
+    while (!Serial){;}
+  }
+  displayConsoleStartupMessage();
+
 }
 
 LEK_Protocol::~LEK_Protocol(){
@@ -127,6 +135,11 @@ void LEK_Protocol::spin(){
       Authenticate packet from FIFO
       Parse packet pulled from FIFO
       If message requires spin hotwire, then execute respin
+      If message matches any acceptance type and sequences on a transaction, mark for destruction
+    Do Transactions work
+    Garbage collect Transactions
+    Do LEDControls work
+    Garbage collect LED Controls
     Check timer ticks for event triggers
     Check RTC ticks for event triggers
     Check for incoming serial message
@@ -171,6 +184,12 @@ void LEK_Protocol::rfmReset(){
   delay(100);
 }
 
+void LEK_Protocol::rfmSendPacket(const uint8_t *packet, uint8_t packet_length){
+  _rf_module->send(packet, packet_length);
+  _rf_module->waitPacketSent();
+  //Submit a request to blink link LED
+}
+
 void LEK_Protocol::rfmReadPacket(){
   if (_rf_module->available()){
     // Should be a message for us now   
@@ -194,13 +213,15 @@ bool LEK_Protocol::rfmReadRadioState(){
 }
 
 void LEK_Protocol::rfmSetRadioState(bool radio_state){
-  digitalWrite(LEK_RFM_RESET_PIN);
+  digitalWrite(LEK_RFM_RESET_PIN, radio_state);
 }
 
-void LEK_Protocol::rfmSendPacket(const uint8_t *packet, uint8_t packet_length){
-  _rf_module->send(packet, packet_length);
-  _rf_module->waitPacketSent();
-  //Submit a request to blink link LED
+bool LEK_Protocol::rfmReadChannelState(){
+  return _rf_module->isChannelActive();
+}
+  
+bool LEK_Protocol::rfmWaitForChannelClear(){
+  return _rf_module->waitCAD();
 }
 
 /* If we've got a line that the user is typing, we should display it here... */
@@ -243,6 +264,50 @@ void LEK_Protocol::updateConsoleState(GatewayConsoleState state){
   _last_console_state = _console_state;
   _console_state = state;
 }
+
+/* TODO: Create print functions for the more obscure data structures */
+void LEK_Protocol::displayConsoleStartupMessage(){
+  Serial.println("LEK STARTUP>");
+  /* This displays the values that are loaded into RAM, not EEPROM. If the system has just reset,
+  then it will reload the values that were saved to EEPROM (or are hardcoded depending on the constructor
+  they used..) */
+  //Mode
+  Serial.print("Mode: ");
+  if (_mode == kGATEWAY_CONSOLE){
+    Serial.println("GATEWAY CONSOLE MODE");
+  } else if (_mode == kGATEWAY_SLAVE){
+    Serial.println("GATEWAY SLAVE MODE");
+  } else if (_mode == kRECEIVER_DEPLOYED){
+    Serial.println("RECEIVER DEPLOYED MODE");
+  } else if (_mode == kRECEIVER_UNPAIRED){
+    Serial.println("RECEIVER UNPAIRED MODE");
+  } else {
+    Serial.println("UNSET");
+  }
+  //Node Name
+  Serial.print("Node Name: ");
+  Serial.println(_node_name);
+
+  //Network Address
+  Serial.print("Network Address: ");
+  Serial.println(_network_address);
+
+  //Tick Rate
+  Serial.print("Tick Rate: ");
+  Serial.println(_tick_rate);
+
+  //UUID
+  Serial.print("UUID: ");
+  Serial.println(_uuid);
+
+  //Beaconing
+  Serial.print("Beaconing: ");
+  Serial.println(_beaconing);
+
+  Serial.println("<LEK STARTUP");
+}
+
+
 
 void LEK_Protocol::clearTerminal(){
   Serial.write(27);       // ESC command
@@ -294,6 +359,10 @@ uint8_t LEK_Protocol::registerEvent(uint8_t (*callback_function)(void), uint8_t 
   /* array of function pointers, which is as large as all of the possible events. Each event owns an index in this table.
   when they are invoked during normal machine function, they check to see if the slot they occupy has a function pointer in it.
   if so, they call that callback function with a pointer to their function metadata (if metadata is desired). */
+  if (event_slot > LEK_NUMBER_OF_EVENT_CALLBACKS){
+      //Sorry, what's this?
+      return -1;
+  }
 }
 
 /* The unit has received a beacon (from any gateway), and triggers this event callback */
@@ -357,30 +426,174 @@ uint8_t LEK_Protocol::serialInterfaceReceiveEvent(){
 *
 */
 
-/* Broken */
-/* The receiver responds with it's event poll configuration when it is requested */
-// Encrypted - Format: [1b] Event Poll Slot 1 [1b] Event Poll Slot 2 [1b] Event Poll Slot 3 [1b] Event Poll Slot 4
-uint8_t *LEK_Protocol::createEventPollConfigurationResponse(uint8_t message_sequence){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  /* Type */
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_EVENT_POLL_CONFIGURATION_RESPONSE);    
-  /* Sequence */
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  /* Salt */
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  /* Payload */
-  for (int i = 0; i < LEK_NUMBER_OF_REGISTERABLE_EVENTS; i++){
-    putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+i, _registered_events[i]);  
+
+uint8_t *LEK_Protocol::createBeacon(DeviceMode mode, const char* node_name, uint8_t network_address, uint32_t uptime_ticks, uint8_t software_version) {
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, LEK_RESERVED_BROADCAST_ADDRESS);
+  if (_mode == kGATEWAY_SLAVE || _mode == kGATEWAY_CONSOLE){
+      putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_BEACON);  
+  } else if (_mode == kRECEIVER_DEPLOYED){
+      putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_BEACON);    
+  } else if (_mode == kRECEIVER_UNPAIRED){
+      //We shouldn't be beaconing if we're unpaired...
+      free(packet);
+      return NULL;
   }
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+LEK_NUMBER_OF_REGISTERABLE_EVENTS, LEK_RESERVED_MESSAGE_TERMINATOR);
+  /* Beacons always have message sequence one. */
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, 0x01); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  uint8_t index_offset = putNodeName(packet, LEK_MESSAGE_PAYLOAD_START, node_name);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset, network_address);
+  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+1, uptime_ticks);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+5, software_version);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createAcknowledgement(uint8_t message_address, uint8_t message_sequence){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_ACK);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, LEK_RESERVED_BYTE);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createAcknowledgement(uint8_t message_address, uint8_t message_sequence, uint8_t error_code){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_NACK);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, error_code);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+uint8_t *LEK_Protocol::createKeyPress(uint8_t message_address, uint8_t message_sequence, int key){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_KEY_PRESS);    
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, key);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createModifierPress(uint8_t message_address, uint8_t message_sequence, int modifier_key, int key){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_MODIFIER_PRESS);    
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, modifier_key);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, key);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+2, LEK_RESERVED_MESSAGE_TERMINATOR);
   return packet;
 }
 
 /* Broken */
-uint8_t *LEK_Protocol::createScheduleResponse(uint8_t message_sequence){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_SCHEDULE_RESPONSE);
+uint8_t *LEK_Protocol::createLinePress(uint8_t message_address, uint8_t message_sequence, const char* line_to_press, size_t line_length, bool terminate_crlf){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_MODIFIER_PRESS);    
   putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, terminate_crlf); /* Implicit cast bool to uint8_t */
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, line_length);
+  uint8_t index_offset = putString(packet, LEK_MESSAGE_PAYLOAD_START+2, line_to_press);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+2, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createMouseMove(uint8_t message_address, uint8_t message_sequence, int x, int y, int speed, int delay){
+
+}
+
+uint8_t *LEK_Protocol::createSetTime(uint8_t message_address, uint8_t message_sequence, uint32_t current_time){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_SET_TIME);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START, current_time); 
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+4, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createPackLine(uint8_t message_address, uint8_t message_sequence, const char* line_byte_code, size_t line_length){
+
+}
+
+/* This is for script chunking, not actually packing an enitre script... */
+uint8_t *LEK_Protocol::createPackScript(uint8_t message_address, uint8_t message_sequence, uint8_t chunk_sequence, const uint8_t *chunk_byte_code){
+
+}
+
+uint8_t *LEK_Protocol::createPackScriptConclude(uint8_t message_address, uint8_t message_sequence, uint8_t initial_sequence){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_PACK_SCRIPT_CONCLUDE);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, initial_sequence); 
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createScheduleScript(uint8_t message_address, uint8_t message_sequence, uint64_t epoch_time_to_execute, uint8_t script_number, uint8_t starting_index){
+
+}
+
+uint8_t *LEK_Protocol::createStatusRequest(uint8_t message_address, uint8_t message_sequence){
+
+}
+
+uint8_t *LEK_Protocol::createStatusResponse(uint8_t request_address, uint8_t request_sequence, const char* node_name, bool beaconing, uint8_t network_address, uint32_t uptime_ticks) {
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, request_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_STATUS_RESPONSE);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, request_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  uint8_t index_offset = putNodeName(packet, LEK_MESSAGE_PAYLOAD_START, _node_name);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset, network_address);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+1, beaconing);
+  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+2, uptime_ticks);
+  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, generateCurrentTime());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+10, LEK_RESERVED_MESSAGE_TERMINATOR);
+  
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createSetEventTrigger(uint8_t message_address, uint8_t message_sequence, uint8_t event_slot_index, uint8_t event_id, uint8_t callback_id){
+
+}
+
+uint8_t *LEK_Protocol::createClearLoads(uint8_t message_address, uint8_t message_sequence){
+
+}
+
+uint8_t *LEK_Protocol::createReset(uint8_t message_address, uint8_t message_sequence){
+
+}
+
+uint8_t *LEK_Protocol::createScuttle(uint8_t message_address, uint8_t message_sequence){
+
+}
+
+/* Broken */
+uint8_t *LEK_Protocol::createScheduleRequest(uint8_t message_address, uint8_t message_sequence){
+
+}
+
+/* Broken */
+uint8_t *LEK_Protocol::createScheduleResponse(uint8_t request_address, uint8_t request_sequence){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, request_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_SCHEDULE_RESPONSE);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, request_sequence); 
   putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
   if (_scripts_loaded > 0){
     for (int i = 0; i < _scripts_loaded-1; i++){
@@ -395,105 +608,9 @@ uint8_t *LEK_Protocol::createScheduleResponse(uint8_t message_sequence){
   return packet;
 }
 
-uint8_t *LEK_Protocol::createSetTime(uint8_t message_sequence, uint32_t current_time){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_SET_TIME);
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START, current_time); 
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+4, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-uint8_t *LEK_Protocol::createScriptPackConclude(uint8_t message_sequence, uint8_t initial_sequence){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_SCRIPT_PACK_CONCLUDE);
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, initial_sequence); 
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-uint8_t *LEK_Protocol::createAcknowledgement(bool nack, uint8_t message_sequence, uint8_t error_code){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  if (nack){
-    putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_NACK);
-  } else {
-    putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_ACK);
-  }
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  if (nack){
-    putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, error_code);
-  } else {
-    putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, LEK_RESERVED_BYTE);
-  }
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-uint8_t *LEK_Protocol::createRequestResponse(uint8_t request_sequence, const char* _node_name, uint8_t _network_address, uint32_t _uptime_ticks) {
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_STATUS_RESPONSE);
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, request_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  uint8_t index_offset = putNodeName(packet, LEK_MESSAGE_PAYLOAD_START, _node_name);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset, _network_address);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+1, _beaconing);
-  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+2, _uptime_ticks);
-  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, generateCurrentTime());
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+10, LEK_RESERVED_MESSAGE_TERMINATOR);
-  
-  return packet;
-}
-
-uint8_t *LEK_Protocol::createBeacon(DeviceMode _mode, const char* _node_name, uint8_t _network_address, uint32_t _uptime_ticks, uint8_t _software_version) {
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  if (_mode == kGATEWAY_SLAVE || _mode == kGATEWAY_CONSOLE){
-      putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_BEACON);  
-  } else if (_mode == kRECEIVER_DEPLOYED){
-      putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_BEACON);    
-  } else if (_mode == kRECEIVER_UNPAIRED){
-      //We shouldn't be beaconing if we're unpaired...
-      free(packet);
-      return NULL;
-  }
-  /* Beacons always have message sequence one. */
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, 0x01); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  uint8_t index_offset = putNodeName(packet, LEK_MESSAGE_PAYLOAD_START, _node_name);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset, _network_address);
-  putUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+1, _uptime_ticks);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+5, _software_version);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-
-uint8_t *LEK_Protocol::createSendKey(uint16_t message_sequence, uint8_t key){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_KEY_PRESS);    
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, key);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-uint8_t *LEK_Protocol::createSendModKey(uint16_t message_sequence, uint8_t mod_key, uint8_t key){
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_MODIFIER_PRESS);    
-  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
-  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, mod_key);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, key);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+2, LEK_RESERVED_MESSAGE_TERMINATOR);
-  return packet;
-}
-
-uint8_t *LEK_Protocol::createExecuteBakedRoutine(uint16_t message_sequence, uint8_t routine_index);{
-  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE+1, sizeof(uint8_t));
+uint8_t *LEK_Protocol::createExecuteBakedRoutine(uint8_t message_address, uint16_t message_sequence, uint8_t routine_index){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
   putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_EXECUTE_BAKED_ROUTINE);    
   putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
   putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
@@ -502,7 +619,49 @@ uint8_t *LEK_Protocol::createExecuteBakedRoutine(uint16_t message_sequence, uint
   return packet;
 }
 
-int LEK_Protocol::determinePacketLength(const uint8_t *packet, size_t absolute_packet_size){
+/* Broken */
+/* The receiver responds with it's event poll configuration when it is requested */
+// Encrypted - Format: [1b] Event Poll Slot 1 [1b] Event Poll Slot 2 [1b] Event Poll Slot 3 [1b] Event Poll Slot 4
+uint8_t *LEK_Protocol::createEventPollConfigurationResponse(uint8_t message_address, uint8_t message_sequence){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_GATEWAY_EVENT_POLL_CONFIGURATION_RESPONSE);    
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  for (int i = 0; i < LEK_NUMBER_OF_REGISTERABLE_EVENTS; i++){
+    putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+i, _registered_events[i]);  
+  }
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+LEK_NUMBER_OF_REGISTERABLE_EVENTS, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createNop(uint8_t message_address, uint8_t message_sequence){
+
+}
+
+uint8_t *LEK_Protocol::createUsbMuxCtl(uint8_t message_address, uint8_t message_sequence, UsbMuxState new_mux_state){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_USB_MUX_CTL);    
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, static_cast<uint8_t>(new_mux_state));
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+uint8_t *LEK_Protocol::createUsbSlavePowerCtl(uint8_t message_address, uint8_t message_sequence, UsbPowerState new_power_state){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);  
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_USB_SLAVE_POWER_CTL);    
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, static_cast<uint8_t>(new_power_state));
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
+}
+
+int LEK_Protocol::determinePacketLength(ImmutablePacket packet, size_t absolute_packet_size){
   /* Searches from the tail of the packet... */
   for (int i = absolute_packet_size; i > 0; i--){
     if (packet[i] == LEK_RESERVED_MESSAGE_TERMINATOR){
@@ -512,12 +671,13 @@ int LEK_Protocol::determinePacketLength(const uint8_t *packet, size_t absolute_p
   return -1;  
 }
 
-bool LEK_Protocol::validatePacket(const uint8_t *packet, size_t absolute_packet_size){
+bool LEK_Protocol::validatePacket(ImmutablePacket packet, size_t absolute_packet_size){
   //Use CRC16 to validate packet contents
-
+  //Check network address to see if it matches ours! If not, does it match the broadcast address?
+  //If not, drop it
 }
 
-void LEK_Protocol::printPacketASCII(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::printPacketASCII(ImmutablePacket packet, size_t absolute_packet_size){
   Serial.println("PACKET>");
   for (int i = absolute_packet_size; i < absolute_packet_size; i++){
     Serial.print(packet[i], HEX);  
@@ -544,7 +704,7 @@ uint32_t LEK_Protocol::generateCurrentTime(){
    return 0xFFFFFFFF;
 }
 
-void manageTransactions(){
+void collectTransaction(){
 
 }
 
@@ -553,10 +713,10 @@ void openTransaction(){
 }
 
 void closeTransaction(){
-  
+
 }
 
-void routePacketToHandler(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::routePacketToHandler(ImmutablePacket packet, size_t absolute_packet_size){
   /* The packet is validated via CRC16 before reaching this, so it's "safe" to assume good data. */
   switch (packet[0]) 
   {
@@ -567,25 +727,22 @@ void routePacketToHandler(const uint8_t *packet, size_t absolute_packet_size){
       handlerBeaconPacket(packet, absolute_packet_size);
       break;
     case LEK_GATEWAY_STATUS_RESPONSE:
-      handlerGatewayStatusResponsePacket(packet, absolute_packet_size);
+      handlerStatusResponsePacket(packet, absolute_packet_size);
       break;
     case LEK_GATEWAY_ACK:
       handlerAckPacket(packet, absolute_packet_size);
       break;
     case LEK_GATEWAY_NACK:
-      handlerNackPacket(packet, absolute_packet_size);
+      handlerAckPacket(packet, absolute_packet_size);
       break;
-    case LEK_GATEWAY_SCRIPT_PACK_CONCLUDE:
-      handlerScriptPackConcludePacket(packet, absolute_packet_size);
+    case LEK_GATEWAY_PACK_SCRIPT_CONCLUDE:
+      handlerPackScriptConcludePacket(packet, absolute_packet_size);
       break;
     case LEK_GATEWAY_SCHEDULE_RESPONSE:
       handlerScheduleResponsePacket(packet, absolute_packet_size);
       break;
     case LEK_GATEWAY_EVENT_POLL_CONFIGURATION_RESPONSE:
       handlerEventPollConfigurationResponsePacket(packet, absolute_packet_size);
-      break;
-    case LEK_GATEWAY_REVSHELL_COMPLETE:
-      handlerRevShellCompletePacket(packet, absolute_packet_size);
       break;
     case LEK_RECEIVER_KEY_PRESS:
       handlerKeyPressPacket(packet, absolute_packet_size);
@@ -647,105 +804,136 @@ void routePacketToHandler(const uint8_t *packet, size_t absolute_packet_size){
   }  
 }
 
-void handlerBeaconPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerBeaconPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  uint8_t beacon_type = getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);
+  uint8_t beacon_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t beacon_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t node_name_length = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  String node_name = getNodeName(packet, node_name_length, LEK_MESSAGE_PAYLOAD_START+1);
+  uint8_t network_address = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length);
+  uint32_t uptime_ticks = getUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length+1);
+  uint8_t software_version = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length+5);
+  //uint8_t message_terminator = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, LEK_RESERVED_MESSAGE_TERMINATOR);
+  //Add this to 'beacons nearby'
+}
+
+void LEK_Protocol::handlerAckPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  uint8_t ack_type = getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);
+  uint8_t ack_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t ack_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t error_code = 0;
+  if (ack_type == LEK_GATEWAY_NACK){
+    error_code = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  } else {
+    //Nothing to do here... Just a reserved byte in there for safe keeping.
+    //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  }
+  //Nothing to do here either... just the message terminator.
+  //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+
+  //Mark the transaction that this is associated with as COMPLETE.
+}
+
+void LEK_Protocol::handlerKeyPressPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  //Nothing to do here... message type.
+  //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);    
+  uint8_t key_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t key_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t key = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  //Nothing to do here either... just the message terminator.
+  //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
+  k(key);
+}
+
+void LEK_Protocol::handlerModifierPressPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  //Nothing to do here... message type.
+  //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
+  uint8_t key_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t key_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t mod_key = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  uint8_t key = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
+  //Nothing to do here either... just the message terminator.
+  //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
+  mod(mod_key, key);
+}
+
+void LEK_Protocol::handlerLinePressPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerGatewayStatusResponsePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerMouseMovePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerAckPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerSetTimePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerNackPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerPackLinePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerScriptPackConcludePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerPackScriptPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerScheduleResponsePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerPackScriptConcludePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerEventPollConfigurationResponsePacket(const uint8_t *packet, size_t absolute_packet_size){
-
-}
-void handlerRevShellCompletePacket(const uint8_t *packet, size_t absolute_packet_size){
-} 
-
-void handlerKeyPressPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerScheduleScriptPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerModifierPressPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerStatusRequestPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerLinePressPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerStatusResponsePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerMouseMovePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerSetEventTriggerPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerSetTimePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerClearLoadsPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerPackLinePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerResetPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerPackScriptPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerScuttlePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerScheduleScriptPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerScheduleResponsePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerStatusRequestPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerScheduleRequestPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerSetEventTriggerPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerEventPollConfigurationResponsePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerClearLoadsPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerExecuteBakedRoutinePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerResetPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerNopPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerScuttlePacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerUsbMuxCtlPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
-void handlerScheduleRequestPacket(const uint8_t *packet, size_t absolute_packet_size){
-
-}
-
-void handlerExecuteBakedRoutinePacket(const uint8_t *packet, size_t absolute_packet_size){
-
-}
-
-void handlerNop(const uint8_t *packet, size_t absolute_packet_size){
-
-}
-
-void handlerUsbMuxCtlPacket(const uint8_t *packet, size_t absolute_packet_size){
-
-}
-
-void handlerUsbSlavePowerCtlPacket(const uint8_t *packet, size_t absolute_packet_size){
+void LEK_Protocol::handlerUsbSlavePowerCtlPacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
 
@@ -792,6 +980,15 @@ void signalFastBlink() {
 *
 *
 */
+String getString(uint8_t *packet, uint8_t packet_string_length, uint8_t index){
+    char packet_string[LEK_MAX_NODE_NAME] = { 0 };
+    if (packet_string_length > LEK_MAX_NODE_NAME){
+        return String("");
+    }
+    memcpy(packet_string, packet+index, packet_string_length);
+    return String(packet_string);    
+}
+
 String getNodeName(uint8_t *packet, uint8_t node_name_length, uint8_t index){
     char node_name[LEK_MAX_NODE_NAME] = { 0 };
     if (node_name_length > LEK_MAX_NODE_NAME){
@@ -856,7 +1053,7 @@ uint32_t getUnsigned32(uint8_t *packet, uint8_t index){
 
 
 uint8_t putNodeName(uint8_t packet[], uint8_t index, const char *node_name){
-    /* strnlen will cap the max value at LEK_MAX_NODE_NAME, no need to capture it later */
+    /* strnlen will cap the max value at LEK_MAX_NODE_NAME, even if it's malformed... */
     uint8_t node_name_length = strnlen(node_name, LEK_MAX_NODE_NAME);
     packet[index] = node_name_length;
     for(int i = 0; i < node_name_length; i++){
@@ -865,10 +1062,20 @@ uint8_t putNodeName(uint8_t packet[], uint8_t index, const char *node_name){
     return node_name_length+1;
 }
 
+uint8_t putString(uint8_t packet[], uint8_t index, const char *c_string){
+    /* The capping value here is pretty arbitrary, since a string long enough would still stomp any fields that proceeded it... */
+    uint8_t string_length = strnlen(c_string, LEK_MAX_PAYLOAD_SIZE-LEK_MINIMUM_MESSAGE_SIZE);
+    packet[index] = string_length;
+    for(int i = 0; i < string_length; i++){
+      packet[index+1+i] = c_string[i]; 
+    }
+    return string_length+1;
+}
+
 void putSigned8(uint8_t packet[], uint8_t index, int8_t su8){
     /* This is assigned to the unsigned array, so if negative, the value will be "wrong" when read
      *  back. BUT, if the receiver of the packet is following the spec, then they should be able to
-     * get the correct value back out.
+     * get the correct value back out. It's not great, but it's not terrible?
      */
     packet[index] = static_cast<uint8_t>(su8);
 }

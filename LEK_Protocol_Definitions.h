@@ -21,15 +21,17 @@
 #define DELAY_RATE  					LEK_DEFAULT_COMMAND_DELAY_RATE
 #define LEK_DEFAULT_SERIAL_BAUD_RATE	9600
 #define LEK_DEFAULT_SERIAL_TIMEOUT		1500
-#define LEK_NUMBER_OF_EVENT_CALLBACKS	4
 /* With the console buffer set at this length, we could stuff the maximum length of a line x2.
 But, we could not stuff an entire script (4096), as that would be fairly ridiculous to pull off
 in a single command anyway... */
 #define LEK_MAX_CONSOLE_BUFFER			512
 #define LEK_MAX_BEACONS_NEARBY			4
+#define LEK_NUMBER_OF_EVENT_CALLBACKS	4
+#define LEK_MAX_ACTIVE_TRANSACTIONS		4
+#define LEK_MAX_ACTIVE_LED_CONTROLS		2
+#define LEK_MAX_UUID_LENGTH				64
 
 /* Ducky script root list! */
-
 enum DuckyScriptCmdDefinition
 {
     kDUCKY_REM,
@@ -77,7 +79,6 @@ enum ExtendedDuckyScriptCmdDefinition
     kDUCKY_SENDPACKET
 };
 
-
 /* 
 Console command definitions 
 send - send a specific packet defined
@@ -99,6 +100,11 @@ help - display this list
 reset - soft-reset system
 version - spit out the firmware version
 interactive - enter interactive typing mode with a particular node
+key - send a key to a particular node
+modkey - send a mod+key to a particular node
+mouse - send a mouse movement to a particular node
+line - send a line to type to a particular node
+event - register a (pre-baked only) event on a particular node
 */
 
 #define kCONSOLE_SEND 			"send"
@@ -118,6 +124,11 @@ interactive - enter interactive typing mode with a particular node
 #define kCONSOLE_RESET			"reset"
 #define kCONSOLE_VERSION		"version"
 #define kCONSOLE_INTERACTIVE	"interactive"
+#define kCONSOLE_KEY			"key"
+#define kCONSOLE_MODKEY			"modkey"
+#define kCONSOLE_MOUSE			"mouse"
+#define kCONSOLE_LINE			"line"
+#define kCONSOLE_EVENT			"event"
 
 /*
   Scripts
@@ -173,10 +184,12 @@ interactive - enter interactive typing mode with a particular node
 #define FAILURE -1
 #define SUCCESS 0
 
-#define LEK_MESSAGE_TYPE_INDEX     0
-#define LEK_MESSAGE_SEQUENCE_INDEX 1
-#define LEK_MESSAGE_SALT_INDEX     3
-#define LEK_MESSAGE_PAYLOAD_START  6
+/* Header Definitions */
+#define LEK_MESSAGE_ADDRESS_INDEX  0
+#define LEK_MESSAGE_TYPE_INDEX     1
+#define LEK_MESSAGE_SEQUENCE_INDEX 2
+#define LEK_MESSAGE_SALT_INDEX     4
+#define LEK_MESSAGE_PAYLOAD_START  7
 
 /* 
  * Scripts and lines use the same storage plates, so you can create a script by stuffing multiple lines, or explicitly 
@@ -185,6 +198,8 @@ interactive - enter interactive typing mode with a particular node
 #define LEK_RESERVED_BYTE               0x01 // SOH
 #define LEK_RESERVED_MESSAGE_TERMINATOR 0xAA // ™
 #define LEK_RESERVED_CMD_MODE_SENTINEL	0x23 // #
+
+#define LEK_RESERVED_BROADCAST_ADDRESS	0xFE
 
 #define LEK_STORAGE_LOCATION_NON_VOLATILE 0x04
 #define LEK_STORAGE_LOCATION_VOLATILE     0x02
@@ -223,35 +238,31 @@ interactive - enter interactive typing mode with a particular node
 
 /* Send Beacon out from the Receiver - Note Beacons always have a zero sequence in the header.*/
 // Unencrypted - Format: [1b] Node Name Length [n-20b] Node Name [1b] Network Address [4b] Uptime Ticks [1b] Software Version
-#define LEK_RECEIVER_BEACON             0x02
+#define LEK_RECEIVER_BEACON             				0x02
 
 /* Status Request response to the Gateway */
 // Encrypted - Format: [1b] Node Name Length [n-20b] Node Name [1b] Network Address [1b] Beaconing [4b] RTC Time [4b] Uptime Ticks
-#define LEK_GATEWAY_STATUS_RESPONSE         0x03
+#define LEK_GATEWAY_STATUS_RESPONSE         			0x03
 
 /* ACK is sent when a message is command is acknowledged by the receiver */
 // Encrypted - Format: [1b] Source Message Sequence
-#define LEK_GATEWAY_ACK               0x04
+#define LEK_GATEWAY_ACK               					0x04
 
 /* NACK is sent when a message is command is not acknowledged by the receiver */
 // Encrypted - Format: [1b] Source Message Sequence [1b] Error/Reason
-#define LEK_GATEWAY_NACK              0x05
+#define LEK_GATEWAY_NACK              					0x05
 
 /* Script Pack Conclude is sent when the receiver has successfully packed the entire script */
 // Encrypted - Format: [1b] Source Message Sequence
-#define LEK_GATEWAY_SCRIPT_PACK_CONCLUDE      0x06
+#define LEK_GATEWAY_PACK_SCRIPT_CONCLUDE      			0x06
 
 /* The receiver responds with it's schedule when it is requested */
 // Encrypted - Format: [1b] Actions Loaded [1b] Script Index [4b] RTC Time
-#define LEK_GATEWAY_SCHEDULE_RESPONSE       0x08
+#define LEK_GATEWAY_SCHEDULE_RESPONSE       			0x08
 
 /* The receiver responds with it's event poll configuration when it is requested */
 // Encrypted - Format: [1b] Event Poll Slot 1 [1b] Event Poll Slot 2 [1b] Event Poll Slot 3 [1b] Event Poll Slot 4
 #define LEK_GATEWAY_EVENT_POLL_CONFIGURATION_RESPONSE   0x0A
-
-/* The receiver responds when it's completed the requested driveby */
-// Encrypted - Format: [1b] 0x01 (Reserved)
-#define LEK_GATEWAY_REVSHELL_COMPLETE    0x0B
 
 /*
 *
@@ -341,7 +352,7 @@ interactive - enter interactive typing mode with a particular node
 
 //Command receiver to do something to the USB MUX
 // Encrypted - Format: [1ub] MUX Device
-#define LEK_RECEIVER_USB_MUX_CTL         0x30
+#define LEK_RECEIVER_USB_MUX_CTL         			 0x30
 enum UsbMuxState
 {
     kMUX_MASTER = 1,
@@ -350,7 +361,7 @@ enum UsbMuxState
 
 //Command receiver to do something with the slave's USB power
 // Encrypted - Format: [1ub] Action
-#define LEK_RECEIVER_USB_SLAVE_POWER_CTL     0x31
+#define LEK_RECEIVER_USB_SLAVE_POWER_CTL     		 0x31
 enum UsbPowerState 
 {
 	kUSB_POWER_OFF = 	1,

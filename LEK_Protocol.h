@@ -39,8 +39,7 @@ enum GatewayConsoleState
 enum ReceiverReceiveState
 {
     kRECEIVER_STATE_NOMINAL,
-    kRECEIVER_STATE_SCRIPT_PACK,
-
+    kRECEIVER_STATE_SCRIPT_PACK
 };
 
 enum UtilityCallbackDefinition 
@@ -72,6 +71,7 @@ enum EventType
 
 enum ErrorType
 {
+    kERROR_NO_ERROR                       = 0x01,
     kERROR_NO_LINE_AT_INDEX               = 0x05,
     kERROR_NO_SCRIPT_AT_INDEX             = 0x06,
     kERROR_INCOMPLETE_TRANSACTION         = 0x07,
@@ -79,8 +79,18 @@ enum ErrorType
     kERROR_BAD_MESSAGE_FORMAT             = 0x09
 };
 
+enum TransactionType
+{
+    kTRANSACTION_WAIT_FOR_ACK             = 0x1A,
+    kTRANSACTION_WAIT_FOR_RESPONSE        = 0x1B
+};
+
 typedef uint8_t (*EventCallbackFunction)(void);
 typedef uint8_t (*ScriptCallFunction)(void);
+typedef const uint8_t* ImmutablePacket;
+
+/* This is the structure that's created by the ScriptMap parser so that the script executor can
+do it's thing. */
 
 typedef struct {
     uint8_t storage_position;
@@ -89,16 +99,41 @@ typedef struct {
     uint8_t line_commands[LEK_MAX_SCRIPT_LINES];
 } ScriptMap;
 
+/* Transactions are created when the system needs to monitor for asynchronous messages,
+they have a lifetime assigned to them for when they will be cleaned up. They are stored 
+on the heap, with references inside an array. */
+
+typedef struct {
+    uint8_t sequence;
+    uint8_t source_type;
+    uint8_t acceptance_type;
+    uint32_t initialization_time;
+    uint32_t lifetime;
+    bool authenticated;
+    bool mark_for_destruction;
+    TransactionType transaction_type;
+} Transaction;
+
+/* These are created when a service wants to blink one of the LEDs asynchronously. */
+
+typedef struct {
+    uint8_t led_pin;
+    uint32_t lifetime;
+    uint32_t blink_rate;
+} LedControl;
+
 /* TODO: This is very C... And, it could probably be made more C++y. */
-String getNodeName(uint8_t *packet, uint8_t node_name_length, uint8_t index);
-uint8_t getUnsigned8(uint8_t *packet, uint8_t index);
-int8_t getSigned8(uint8_t *packet, uint8_t index);
-int16_t getSigned16(uint8_t *packet, uint8_t index);
-uint16_t getUnsigned16(uint8_t *packet, uint8_t index);
-int32_t getSigned32(uint8_t *packet, uint8_t index);
-uint32_t getUnsigned32(uint8_t *packet, uint8_t index);
+String getString(uint8_t *packet, uint8_t packet_string_length, uint8_t index);
+String getNodeName(const uint8_t *packet, uint8_t node_name_length, uint8_t index);
+uint8_t getUnsigned8(const uint8_t *packet, uint8_t index);
+int8_t getSigned8(const uint8_t *packet, uint8_t index);
+int16_t getSigned16(const uint8_t *packet, uint8_t index);
+uint16_t getUnsigned16(const uint8_t *packet, uint8_t index);
+int32_t getSigned32(const uint8_t *packet, uint8_t index);
+uint32_t getUnsigned32(const uint8_t *packet, uint8_t index);
 
 uint8_t putNodeName(uint8_t packet[], uint8_t index, const char *node_name);
+uint8_t putString(uint8_t packet[], uint8_t index, const char *c_string);
 void putSigned8(uint8_t packet[], uint8_t index, int8_t su8);
 void putUnsigned8(uint8_t packet[], uint8_t index, uint8_t ui8);
 void putSigned16(uint8_t packet[], uint8_t index, int16_t su16);
@@ -109,10 +144,12 @@ void putUnsigned32(uint8_t packet[], uint8_t index, uint32_t ui32);
 void signalFaultTrap();
 void signalFastBlink();
 
+/* TODO: Implement proper end to end encryption with the ATAES132 */
+uint8_t writeKey();
 uint8_t *decryptIncomingPacket();
 uint8_t *encryptOutgoingPacket(uint8_t packet[]);
 
-/* Keyboard and Mouse Reduction Functions -- Refactor: Does not adhere to style guide. Needs some cleanup
+/* TODO: Does not adhere to style guide. Needs some cleanup
 and modularization. Maybe, roll into an Attack class? */
 void k(int key);
 void mod(int mod, int key);
@@ -139,6 +176,7 @@ class LEK_Protocol {
 
   void displayConsole();
   void updateConsoleState(GatewayConsoleState state);
+  void displayConsoleStartupMessage();
   void clearTerminal();
 
   void reloadParametersFromEEPROM();
@@ -162,59 +200,80 @@ class LEK_Protocol {
   uint8_t rtcTicksEvent();
   uint8_t serialInterfaceReceiveEvent();
 
-  uint8_t *createEventPollConfigurationResponse(uint8_t message_sequence);
-  uint8_t *createScheduleResponse(uint8_t message_sequence);
-  uint8_t *createSetTime(uint8_t message_sequence, uint32_t current_time);
-  uint8_t *createScriptPackConclude(uint8_t message_sequence, uint8_t initial_sequence);
-  uint8_t *createAcknowledgement(bool nack, uint8_t message_sequence, uint8_t error_code);
-  uint8_t *createRequestResponse(uint8_t request_sequence, const char* _node_name, uint8_t _network_address, uint32_t _uptime_ticks);
-  uint8_t *createBeacon(DeviceMode _mode, const char* _node_name, uint8_t _network_address, uint32_t _uptime_ticks, uint8_t _software_version);
-  uint8_t *createSendKey(uint16_t message_sequence, uint8_t key);
-  uint8_t *createSendModKey(uint16_t message_sequence, uint8_t mod_key, uint8_t key);
-  uint8_t *createExecuteBakedRoutine(uint16_t message_sequence, uint8_t routine_index);
-  int determinePacketLength(const uint8_t *packet, size_t absolute_packet_size);
-  bool validatePacket(const uint8_t *packet, size_t absolute_packet_size)
-  void printPacketASCII(const uint8_t *packet, size_t absolute_packet_size);
+  uint8_t *createBeacon(DeviceMode mode, const char* node_name, uint8_t network_address, uint32_t uptime_ticks, uint8_t software_version);
+  uint8_t *createAcknowledgement(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createAcknowledgement(uint8_t message_address, uint8_t message_sequence, uint8_t error_code);
+  uint8_t *createKeyPress(uint8_t message_address, uint8_t message_sequence, int key);
+  uint8_t *createModifierPress(uint8_t message_address, uint8_t message_sequence, int modifier_key, int key);
+  uint8_t *createLinePress(uint8_t message_address, uint8_t message_sequence, const char* line_to_press, size_t line_length, bool terminate_crlf);
+  uint8_t *createMouseMove(uint8_t message_address, uint8_t message_sequence, int x, int y, int speed, int delay);
+  uint8_t *createSetTime(uint8_t message_address, uint8_t message_sequence, uint32_t current_time);
+  uint8_t *createPackLine(uint8_t message_address, uint8_t message_sequence, const char* line_byte_code, size_t line_length);
+  uint8_t *createPackScript(uint8_t message_address, uint8_t message_sequence, uint8_t chunk_sequence, const uint8_t *chunk_byte_code);
+  uint8_t *createPackScriptConclude(uint8_t message_address, uint8_t message_sequence, uint8_t initial_sequence);
+  uint8_t *createScheduleScript(uint8_t message_address, uint8_t message_sequence, uint64_t epoch_time_to_execute, uint8_t script_number, uint8_t starting_index);
+  uint8_t *createStatusRequest(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createStatusResponse(uint8_t request_address, uint8_t request_sequence, const char* node_name, bool beaconing, uint8_t network_address, uint32_t uptime_ticks);
+  uint8_t *createSetEventTrigger(uint8_t message_address, uint8_t message_sequence, uint8_t event_slot_index, uint8_t event_id, uint8_t callback_id);
+  uint8_t *createClearLoads(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createReset(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createScuttle(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createScheduleRequest(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createScheduleResponse(uint8_t request_address, uint8_t request_sequence);
+  uint8_t *createExecuteBakedRoutine(uint8_t message_address, uint16_t message_sequence, uint8_t routine_index);
+  uint8_t *createEventPollConfigurationResponse(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createNop(uint8_t message_address, uint8_t message_sequence);
+  uint8_t *createUsbMuxCtl(uint8_t message_address, uint8_t message_sequence, UsbMuxState new_mux_state);
+  uint8_t *createUsbSlavePowerCtl(uint8_t message_address, uint8_t message_sequence, UsbPowerState new_power_state);
+  int determinePacketLength(ImmutablePacket packet, size_t absolute_packet_size);
+  bool validatePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void printPacketASCII(ImmutablePacket packet, size_t absolute_packet_size);
   uint32_t generateMessageSalt();
   uint32_t generateCurrentTime();
 
-  void manageTransactions();
   void openTransaction();
+  void workTransaction();
   void closeTransaction();
+  void collectTransactions();
 
-  /* This could use a refactoring to something a bit less cumbersome... */
-  void routePacketToHandler(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerBeaconPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerGatewayStatusResponsePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerAckPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerNackPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerScriptPackConcludePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerScheduleResponsePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerEventPollConfigurationResponsePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerRevShellCompletePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerKeyPressPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerModifierPressPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerLinePressPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerMouseMovePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerSetTimePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerPackLinePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerPackScriptPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerScheduleScriptPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerStatusRequestPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerSetEventTriggerPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerClearLoadsPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerResetPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerScuttlePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerScheduleRequestPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerExecuteBakedRoutinePacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerNopPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerUsbMuxCtlPacket(const uint8_t *packet, size_t absolute_packet_size);
-  void handlerUsbSlavePowerCtlPacket(const uint8_t *packet, size_t absolute_packet_size);
+  void openLedControl();
+  void workLedControl();
+  void closeLedControl();
+  void collectLedControls();
+
+  /* TODO: This could use a refactoring to something a bit less cumbersome... */
+  void routePacketToHandler(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerBeaconPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerAckPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerNackPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerKeyPressPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerModifierPressPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerLinePressPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerMouseMovePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerSetTimePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerPackLinePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerPackScriptPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerPackScriptConcludePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerScheduleScriptPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerStatusRequestPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerStatusResponsePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerSetEventTriggerPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerClearLoadsPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerResetPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerScuttlePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerScheduleResponsePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerScheduleRequestPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerExecuteBakedRoutinePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerEventPollConfigurationResponsePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerNopPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerUsbMuxCtlPacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerUsbSlavePowerCtlPacket(ImmutablePacket packet, size_t absolute_packet_size);
 
   void setSystemTime(byte seconds, byte minutes, byte hours, byte day, byte month, byte year);
   uint64_t getSystemTime(void);
 
-  /* This ticker will overflow in 49.1 days if it's not cycled off into another variable at another rate. */
+  /* TODO: This ticker will overflow in 49.1 days if it's not cycled off into another variable at another rate. 
+  Beacons don't REALLY need their own timer... But, whatever. */
   elapsedMillis uptime_ticks_actual;
   elapsedMillis beacon_ticks;
 
@@ -223,13 +282,13 @@ class LEK_Protocol {
   uint8_t _global_sequence;
   uint8_t _network_address;
   uint8_t _scripts_loaded;
-  uint64_t _uuid;
+  char _uuid[LEK_MAX_UUID_LENGTH];
   char _node_name[LEK_MAX_NODE_NAME+1];
   bool _beaconing;
   bool _radio_state;
+  uint16_t _tick_rate;
 
   /* Statistics */
-  uint16_t _tick_rate;
   uint64_t _uptime_ticks;
   int8_t _last_rssi;
   uint16_t _count_of_failed_packet_receives;
@@ -242,7 +301,8 @@ class LEK_Protocol {
   EventType _registered_events[LEK_NUMBER_OF_REGISTERABLE_EVENTS];
   
   RH_RF95 *_rf_module;
-  QueueList<uint8_t*> _packet_buffer;
+  QueueList<uint8_t*> _recv_packet_buffer;
+  QueueList<uint8_t*> _send_packet_buffer;
   /* Protocol Controls */
   uint8_t _beacons_nearby[LEK_MAX_BEACONS_NEARBY];
   uint8_t _count_of_beacons_nearby;
@@ -250,13 +310,16 @@ class LEK_Protocol {
   /* Statically allocated buffers, you say? */
   char _temp_script[LEK_MAX_SCRIPT_SIZE];
 
+  /* TODO: Reimplement the radio layer using RHDatagrams & Addresses */
   void rfmReset();
   void rfmSetup();
   void rfmSendPacket(const uint8_t *packet, uint8_t packet_length);
   void rfmReadPacket();
-  /* This function puts the packet into the packet queue */
+  /* This function puts the packet into the packet queue, it does not return a packet... */
   bool rfmReadRadioState();
-  void rfmSetRadioState(bool radio_state)
+  void rfmSetRadioState(bool radio_state);
+  bool rfmReadChannelState();
+  bool rfmWaitForChannelClear();
 };
 
 #endif /* _LEK_PROTOCOL_H_ */
