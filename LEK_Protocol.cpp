@@ -1,15 +1,3 @@
-#ifdef __AVR__
-  #include <avr/pgmspace.h>
-#elif defined(ESP8266)
- #include <pgmspace.h>
-#else
- #define pgm_read_byte(addr) (*(const unsigned char *)(addr))
-#endif
-
-#if !defined(__ARM_ARCH) && !defined(ENERGIA) && !defined(ESP8266)
- #include <util/delay.h>
-#endif
-
 #include <stdlib.h>
 #include <stdint.h>
 #include <SPI.h>
@@ -36,37 +24,21 @@
 //TODO: I currently extremely dislike this section of the code...
 LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, uint64_t user_uuid, const char* user_node_name, bool user_beaconing)
   {
-  SPI.begin();
-  Serial.begin(LEK_DEFAULT_SERIAL_BAUD_RATE);
-  Serial.setTimeout(LEK_DEFAULT_SERIAL_TIMEOUT);
-  std::unique_ptr<RH_RF95> _rf_module(new RH_RF95(LEK_RFM_CS_PIN, LEK_RFM_INT_PIN));
-
-  pinMode(LEK_LINK_LED_PIN, OUTPUT);
-  pinMode(LEK_HB_LED_PIN, OUTPUT);
-  pinMode(LEK_USB_DEVICE_MUX_PIN, OUTPUT);
-  pinMode(LEK_USB_DEVICE_PWR_PIN, OUTPUT);
-
-  pinMode(LEK_RFM_RESET_PIN, INPUT_PULLUP);
-
-  rfmReset();
-  delay(100);
-  rfmSetup();
-
-  Serial.println("I did it!!!!");
-
   _global_sequence = 0;
   _network_address = user_network_address;
-  /* TODO: strncpy to the _uuid array */
+  /* TODO: uuid should be two uint32s. uuid_high uuid_low. Forget these strings. */
   //_uuid = user_uuid;
-  /* copy user name to node name - strncpy limited to size of buffer */
   _node_name[LEK_MAX_NODE_NAME] = { 0 };
+  strncpy(_node_name, user_node_name, sizeof(_node_name)-1);
   _beaconing = user_beaconing;
   _tick_rate = LEK_DEFAULT_TICK_RATE;
   _uptime_ticks = 0;
+  _console_state = kCONSOLE_STATE_NO_STATE;
   /* Memset these statically allocated buffers, you say? */
   memset(_event_callbacks, 0, sizeof(_event_callbacks));
   memset(_temp_script, 0, sizeof(_temp_script));
 
+  _mode = user_mode;
   if (user_mode == kGATEWAY_SLAVE){
     /* Gateway Master mode replays any received packets to the 
     receiver program on the PC. It drains the FIFO as it's filled, and will
@@ -100,17 +72,8 @@ LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, u
     /* Receiver Unpaired is awaiting setup data from a console program on the PC. */
 
   } else {
-    /* No (or incorrect) mode  selected, cannot continue. Fall back into console mode. */
-    signalFastBlink();
+    /* No (or incorrect) mode  selected. */
   }
-
-  /* If the unit is in console mode, it will spin and wait for the user's Serial connection
-  to attach... */
-  if (user_mode == kGATEWAY_CONSOLE){
-    while (!Serial){;}
-  }
-  displayConsoleStartupMessage();
-
 }
 
 LEK_Protocol::~LEK_Protocol(){
@@ -120,8 +83,27 @@ void LEK_Protocol::begin() {
   /* Setup event registration buffers, permanent/temporary storage locations, 
   recover setup information from the EEPROM, execute poweron events, setup event buffers,
   setup incoming packet buffers, setup mode, setup i2c keystore. */
+  _rf_module = new RH_RF95(LEK_RFM_CS_PIN, LEK_RFM_INT_PIN);
+  rfmReset();
+  delay(100);
+  rfmSetup();
 
+  /* initialize ATAES132A */
 
+  /* Startup blink 1 */
+  signalFastBlink();
+
+  /* If the unit is in console mode, it will spin and wait for the user's Serial connection
+  to attach... */
+  if (_mode == kGATEWAY_CONSOLE){
+    while (!Serial){ ; } //Wait for the console to attach...
+    displayConsoleStartupMessage();
+    updateConsoleState(kCONSOLE_STATE_MAIN_MENU);
+    displayDividerLine();
+  }
+
+  /* Startup blink 2 */
+  signalFastBlink();
 }
 
 void LEK_Protocol::spin(){
@@ -152,6 +134,14 @@ void LEK_Protocol::spin(){
     Tick uptime timer
     Tick beacon timer
   */
+
+  rfmReadPacket();
+  if (_mode == kRECEIVER_DEPLOYED){
+
+  } else if (_mode == kGATEWAY_CONSOLE){
+    displayConsole();
+    getConsoleCommand();
+  }
   tickUptime();
   tickBeacon();
 }
@@ -224,8 +214,15 @@ void LEK_Protocol::rfmReadPacket(){
     
     /* This will block for a short time if the packet is not "complete" */
     if (_rf_module->recv(buf, &len)){
-      //Add to packet QueueList
+      RH_RF95::printBuffer("Received: ", buf, len);
+      Serial.print("Got: ");
+      Serial.println((char*)buf);
+      Serial.print("RSSI: ");
+      Serial.println(_rf_module->lastRssi(), DEC);
+      //TODO: Add to packet QueueList instead of directly invoking the router!
       //Submit a request to blink link LED
+      routePacketToHandler((ImmutablePacket)buf, len);
+      signalLinkBlink();
     } else {
       _count_of_failed_packet_receives++;
     }
@@ -252,29 +249,47 @@ bool LEK_Protocol::rfmWaitForChannelClear(){
 
 /* If we've got a line that the user is typing, we should display it here... */
 void LEK_Protocol::displayConsole(){
-  this->clearTerminal();
-  //Display system information here?
-  Serial.print(">");
+  //TODO: Reset terminal on: Successful command, state change
+  //clearTerminal();
+  //TODO: Display system information here
   //Display buffered serial command line depending on the state... _console_buffer
   switch (_console_state) 
   {
+    case kCONSOLE_STATE_PARSING_COMMAND:
+      break;
     case kCONSOLE_STATE_MAIN_MENU:
-      if (_last_console_state != kCONSOLE_STATE_MAIN_MENU){
+      if (_last_console_state == kCONSOLE_STATE_PARSING_COMMAND){
+        Serial.println("");
+        Serial.print(">");
+        _last_console_state = kCONSOLE_STATE_MAIN_MENU;
+      } else if (_last_console_state != kCONSOLE_STATE_MAIN_MENU){
+        clearTerminal();
+        Serial.println("");
+        Serial.print(">");
         _last_console_state = kCONSOLE_STATE_MAIN_MENU;
       }
       break;
     case kCONSOLE_STATE_SCANNING:
       if (_last_console_state != kCONSOLE_STATE_SCANNING){
+        clearTerminal();
+        Serial.println("");
+        Serial.print(">");
         _last_console_state = kCONSOLE_STATE_SCANNING;
       } 
       break;
     case kCONSOLE_STATE_PAIRING:
       if (_last_console_state != kCONSOLE_STATE_PAIRING){
+        clearTerminal();
+        Serial.println("");
+        Serial.print(">");
         _last_console_state = kCONSOLE_STATE_PAIRING;
       } 
       break;
     case kCONSOLE_STATE_RECEIVING:
       if (_last_console_state != kCONSOLE_STATE_RECEIVING){
+        clearTerminal();
+        Serial.println("");
+        Serial.print(">");
         _last_console_state = kCONSOLE_STATE_RECEIVING;
       } 
       break;
@@ -341,6 +356,180 @@ void LEK_Protocol::clearTerminal(){
   Serial.write(27);
   Serial.print("[H");     // cursor to home command
 }
+
+void LEK_Protocol::displayDividerLine(){
+    Serial.println("");
+
+    for(int i = 0; i < LEK_CONSOLE_DIVIDING_LINE_LENGTH; i++){
+        Serial.print("-");
+    }
+
+    Serial.println("");
+}
+
+/* TODO: If you use PuTTY, this may come in piecemeal, but if you use Arduino IDE Serial Monitor, it'll come
+in as a big chunk. For now, I'm going to assume it's coming in as a chunk but will extend this functionality
+later. */
+void LEK_Protocol::getConsoleCommand(){
+    uint8_t serial_available = Serial.available();
+    if (Serial.available() > 0) {
+        String received_string = Serial.readString();
+        parseConsoleCommand(received_string);
+    } 
+}
+
+void LEK_Protocol::parseConsoleCommand(String command_in){
+  /* Tokenize the incoming string and traverse the parsing tree... */
+  updateConsoleState(kCONSOLE_STATE_PARSING_COMMAND);
+  Serial.println(command_in);
+  uint8_t token_index = 0;
+  /* AFAIK, we need the string to be mutable to use strtok... TODO: Make this more C++y. */
+  char command_in_c[LEK_MAX_COMMAND_LENGTH] = { 0 };
+  char tokenized_command[LEK_MAX_CONSOLE_TOKENIZED_ARGUMENTS][256] = { 0 };
+  strncpy(command_in_c, command_in.c_str(), sizeof(command_in_c));
+  char *p = strtok(command_in_c, " ");
+  while (p) {
+      strncpy(tokenized_command[token_index], p, sizeof(tokenized_command[token_index]));
+      token_index++;
+      p = strtok(NULL, " ");
+  }
+
+  /*for (int i = 0; i < token_index; i++){
+    Serial.println(tokenized_command[i]);
+  }*/
+
+  //TODO: Make this more efficient and BETTER!
+  //Call service function based on command...
+  if (strcmp(tokenized_command[0], LEK_CONSOLE_SEND) == 0){
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_SCAN) == 0){
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_BEACON) == 0){
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_PAIR) == 0){
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_RECEIVE) == 0){
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_CLEAR) == 0){
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_SET) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_GET) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_RADIO) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_SLEEP) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_PIN) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_PINMODE) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_HELP) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_RESET) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_INTERACTIVE) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_KEY) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_MODKEY) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_MOUSE) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_CLICK) == 0){
+    //0 Command
+    //1 Address
+    //2 Button To Click
+    /* TODO: STRTOL STRTOL STRTOL STRTOL */
+    uint8_t destination_address = atoi(tokenized_command[1]);
+    Serial.print("Sending to: ");
+    Serial.println(destination_address);
+    /* TODO: Parse string to translate LEFT/RIGHT/CENTER to the definitions that the Arduino Mouse library uses. */
+    /*int line_offset = 9;
+    char line_out[LEK_MAX_COMMAND_LENGTH] = { 0 };
+    strncpy(line_out, command_in.c_str()+line_offset, sizeof(line_out));
+    Serial.print("Line:");
+    Serial.println(line_out);
+    int line_size = strnlen(line_out, sizeof(line_out)-1);*/
+    int button_to_click = MOUSE_LEFT;
+    uint8_t *click_packet = createMouseClick(LEK_DEFAULT_GATEWAY_ADDRESS, getGlobalSequence(), button_to_click);
+    size_t click_packet_size = determinePacketLength(click_packet, LEK_MAX_PAYLOAD_SIZE);
+    rfmSendPacket((const uint8_t *)click_packet, click_packet_size);
+    free(click_packet);
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_LINE) == 0){
+    //0 Command
+    //1 Address
+    //2 Terminate CRLF
+    //3+ Line To Send
+    /* TODO: STRTOL STRTOL STRTOL STRTOL */
+    uint8_t destination_address = atoi(tokenized_command[1]);
+    uint8_t terminate_crlf = atoi(tokenized_command[2]);
+    Serial.print("Sending to: ");
+    Serial.println(destination_address);
+    /* TODO: line offset??? This is a messssssss */
+    int line_offset = 9;
+    char line_out[LEK_MAX_COMMAND_LENGTH] = { 0 };
+    strncpy(line_out, command_in.c_str()+line_offset, sizeof(line_out));
+    Serial.print("Line:");
+    Serial.println(line_out);
+    int line_size = strnlen(line_out, sizeof(line_out)-1);
+    uint8_t *line_packet = createLinePress(LEK_DEFAULT_GATEWAY_ADDRESS, getGlobalSequence(), (const char*)line_out, line_size, terminate_crlf);
+    size_t line_packet_size = determinePacketLength(line_packet, LEK_MAX_PAYLOAD_SIZE);
+    rfmSendPacket((const uint8_t *)line_packet, line_packet_size);
+    free(line_packet);
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_MODKEY) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_EVENT) == 0){
+    
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_STATS) == 0){
+    displayConsoleStartupMessage();
+
+  } else if (strcmp(tokenized_command[0], LEK_CONSOLE_ROUTINE) == 0){ 
+    uint8_t destination_address = atoi(tokenized_command[1]);
+    uint8_t routine_to_run = atoi(tokenized_command[2]);
+    Serial.print("Sending to: ");
+    Serial.println(destination_address);
+    Serial.print("routine:");
+    Serial.println(routine_to_run);
+    /* TODO: Parse string to translate LEFT/RIGHT/CENTER to the definitions that the Arduino Mouse library uses. */
+    /*int line_offset = 9;
+    char line_out[LEK_MAX_COMMAND_LENGTH] = { 0 };
+    strncpy(line_out, command_in.c_str()+line_offset, sizeof(line_out));
+    Serial.print("Line:");
+    Serial.println(line_out);
+    int line_size = strnlen(line_out, sizeof(line_out)-1);*/
+    uint8_t *routine_packet = createExecuteBakedRoutine(LEK_DEFAULT_GATEWAY_ADDRESS, getGlobalSequence(), routine_to_run);
+    size_t routine_packet_size = determinePacketLength(routine_packet, LEK_MAX_PAYLOAD_SIZE);
+    rfmSendPacket((const uint8_t *)routine_packet, routine_packet_size);
+    free(routine_packet);
+
+  }  else if (strcmp(tokenized_command[0], LEK_CONSOLE_SLAVE_POWER) == 0){
+    uint8_t destination_address = atoi(tokenized_command[1]);
+    uint8_t power_state = atoi(tokenized_command[2]);
+    Serial.print("Sending to: ");
+    Serial.println(destination_address);
+    Serial.print("power state:");
+    Serial.println(power_state);
+
+    uint8_t *power_packet = createUsbSlavePowerCtl(LEK_DEFAULT_GATEWAY_ADDRESS, getGlobalSequence(), static_cast<UsbPowerState>(power_state));
+    size_t power_packet_size = determinePacketLength(power_packet, LEK_MAX_PAYLOAD_SIZE);
+    rfmSendPacket((const uint8_t *)power_packet, power_packet_size);    
+    free(power_packet);
+
+  }  else if (strcmp(tokenized_command[0], LEK_CONSOLE_SLAVE_MUX) == 0){
+
+  }
+
+  /* If we're sending a line, we need to find the index after the last argument, and then use pointer
+  math to align ourselves to the line string... */
+
+
+  updateConsoleState(kCONSOLE_STATE_MAIN_MENU);
+
+}
+
 
 void LEK_Protocol::duckyParse(const char* command_string){
   /* We're parsing the DuckyScript commands in the script */
@@ -524,7 +713,7 @@ uint8_t *LEK_Protocol::createModifierPress(uint8_t message_address, uint8_t mess
 uint8_t *LEK_Protocol::createLinePress(uint8_t message_address, uint8_t message_sequence, const char* line_to_press, size_t line_length, bool terminate_crlf){
   uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
   putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);
-  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_MODIFIER_PRESS);    
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_LINE_PRESS);    
   putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
   putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
   putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, terminate_crlf); /* Implicit cast bool to uint8_t */
@@ -535,6 +724,17 @@ uint8_t *LEK_Protocol::createLinePress(uint8_t message_address, uint8_t message_
 
 uint8_t *LEK_Protocol::createMouseMove(uint8_t message_address, uint8_t message_sequence, int x, int y, int speed, int delay){
 
+}
+
+uint8_t *LEK_Protocol::createMouseClick(uint8_t message_address, uint8_t message_sequence, int button_to_click){
+  uint8_t *packet = (uint8_t *)calloc(LEK_MAX_PAYLOAD_SIZE, sizeof(uint8_t));
+  putUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX, message_address);
+  putUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX, LEK_RECEIVER_SET_TIME);
+  putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
+  putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, static_cast<uint8_t>(button_to_click)); 
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
+  return packet;
 }
 
 uint8_t *LEK_Protocol::createSetTime(uint8_t message_address, uint8_t message_sequence, uint32_t current_time){
@@ -712,21 +912,21 @@ void LEK_Protocol::printPacketASCII(ImmutablePacket packet, size_t absolute_pack
 }
 
 void LEK_Protocol::setSystemTime(byte seconds, byte minutes, byte hours, byte day, byte month, byte year) {
-  /* Set's the RTCs time */
+  /* TODO: Set's the RTCs time */
 }
 
 uint64_t LEK_Protocol::getSystemTime(void) {
-  /* Pulls the values from the RTC, and converts them to EPOCH time used in the messages. */
+  /* TODO: Pulls the values from the RTC, and converts them to EPOCH time used in the messages. */
 }
 
 
 uint32_t LEK_Protocol::generateMessageSalt(){
-   /* Some fancy logic for a sweet message salt here. */
+   /* TODO: Some fancy logic for a sweet message salt here. */
    return 0xFFFFFFFF;
 }
 
 uint32_t LEK_Protocol::generateCurrentTime(){
-   /* Some fancy logic to grab the value from the RTC here.  */
+   /* TODO: Some fancy logic to grab the value from the RTC here.  */
    return 0xFFFFFFFF;
 }
 
@@ -763,7 +963,7 @@ void collectBeacons(){
 /* TODO: Giant switch of DOOOOOOOOOOOOOM. */
 void LEK_Protocol::routePacketToHandler(ImmutablePacket packet, size_t absolute_packet_size){
   /* The packet is validated via CRC16 before reaching this, so it's "safe" to assume good data. */
-  switch (packet[0]) 
+  switch (packet[LEK_MESSAGE_TYPE_INDEX]) 
   {
     case LEK_RECEIVER_BEACON:
       handlerBeaconPacket(packet, absolute_packet_size);
@@ -800,6 +1000,9 @@ void LEK_Protocol::routePacketToHandler(ImmutablePacket packet, size_t absolute_
       break;
     case LEK_RECEIVER_MOUSE_MOVE:
       handlerMouseMovePacket(packet, absolute_packet_size);
+      break;
+    case LEK_RECEIVER_MOUSE_CLICK:
+      handlerMouseClickPacket(packet, absolute_packet_size);
       break;
     case LEK_RECEIVER_SET_TIME:
       handlerSetTimePacket(packet, absolute_packet_size);
@@ -859,7 +1062,7 @@ void LEK_Protocol::handlerBeaconPacket(ImmutablePacket packet, size_t absolute_p
   uint32_t uptime_ticks = getUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length+1);
   uint8_t software_version = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length+5);
   //uint8_t message_terminator = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, LEK_RESERVED_MESSAGE_TERMINATOR);
-  /* Search the _beacons_nearby vector for a beacon that matches the node_name of this Beacon. If you don't find one, add it to the list.
+  /* TODO: Search the _beacons_nearby vector for a beacon that matches the node_name of this Beacon. If you don't find one, add it to the list.
   If you do find it, you should destroy that one and pop this one into the list. */
   _beacons_nearby.push_back(Beacon(beacon_type, node_name, network_address, uptime_ticks, software_version, _uptime_ticks, _last_rssi));
 
@@ -879,10 +1082,15 @@ void LEK_Protocol::handlerAckPacket(ImmutablePacket packet, size_t absolute_pack
   //Nothing to do here either... just the message terminator.
   //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
 
-  //Mark the transaction that this is associated with as COMPLETE/SUCCESS.
+  // For now, just pop this out there so we know the request was successful.
+  Serial.println("ok");
+  //TODO: Mark the transaction that this is associated with as COMPLETE/SUCCESS.
 }
 
 void LEK_Protocol::handlerKeyPressPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  if (_mode == kGATEWAY_CONSOLE){
+    return;
+  }  
   uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
   //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);    
   uint8_t key_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
@@ -893,9 +1101,16 @@ void LEK_Protocol::handlerKeyPressPacket(ImmutablePacket packet, size_t absolute
   k(key);
 
   //Send an ACK back
+  uint8_t *ack_packet = createAcknowledgement(return_address, key_sequence);
+  size_t ack_packet_size = determinePacketLength(ack_packet, LEK_MAX_PAYLOAD_SIZE);
+  rfmSendPacket((const uint8_t *)ack_packet, ack_packet_size);
+  free(ack_packet);
 }
 
 void LEK_Protocol::handlerModifierPressPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  if (_mode == kGATEWAY_CONSOLE){
+    return;
+  }
   uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
   //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
   uint8_t key_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
@@ -907,9 +1122,16 @@ void LEK_Protocol::handlerModifierPressPacket(ImmutablePacket packet, size_t abs
   mod(mod_key, key);
 
   //Send an ACK back
+  uint8_t *ack_packet = createAcknowledgement(return_address, key_sequence);
+  size_t ack_packet_size = determinePacketLength(ack_packet, LEK_MAX_PAYLOAD_SIZE);
+  rfmSendPacket((const uint8_t *)ack_packet, ack_packet_size);
+  free(ack_packet);
 }
 
 void LEK_Protocol::handlerLinePressPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  if (_mode == kGATEWAY_CONSOLE){
+    return;
+  }
   uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
   //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
   uint8_t line_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
@@ -917,16 +1139,42 @@ void LEK_Protocol::handlerLinePressPacket(ImmutablePacket packet, size_t absolut
   bool line_terminate_crlf = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
   uint8_t line_length = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
   char line[LEK_MAX_LINE_LENGTH] = { 0 };
-  strncpy(line, (char *)packet+LEK_MESSAGE_PAYLOAD_START+1, sizeof(line)-1);
+  strncpy(line, (char *)packet+LEK_MESSAGE_PAYLOAD_START+2, sizeof(line)-1);
   String line_s = line;
   typeln(line_s);
+  if (line_terminate_crlf){
+    delay(100);
+    Keyboard.write(0xB0);
+  }
+
+  Serial.println("got a line press packet");
+  Serial.println(return_address);
+  Serial.println(line_sequence);
+  Serial.println(line_salt);
+  Serial.println(line_terminate_crlf);
+  Serial.println(line_length);
+  Serial.println(line);
 
   //Send an ACK back
+  uint8_t *ack_packet = createAcknowledgement(return_address, line_sequence);
+  size_t ack_packet_size = determinePacketLength(ack_packet, LEK_MAX_PAYLOAD_SIZE);
+  rfmSendPacket((const uint8_t *)ack_packet, ack_packet_size);
+  free(ack_packet);
 }
 
 void LEK_Protocol::handlerMouseMovePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
 }
+
+void LEK_Protocol::handlerMouseClickPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
+  //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
+  uint8_t click_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t click_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t button_to_click = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  Mouse.click(button_to_click);
+}
+
 
 void LEK_Protocol::handlerSetTimePacket(ImmutablePacket packet, size_t absolute_packet_size){
 
@@ -985,7 +1233,16 @@ void LEK_Protocol::handlerEventPollConfigurationResponsePacket(ImmutablePacket p
 }
 
 void LEK_Protocol::handlerExecuteBakedRoutinePacket(ImmutablePacket packet, size_t absolute_packet_size){
-
+  uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
+  //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
+  uint8_t click_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t click_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t routine_to_run = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  if (routine_to_run == 1){
+    execute_test_usb_driveby_osx();
+  } else if (routine_to_run == 2){
+    quitAppMacOs();
+  }
 }
 
 void LEK_Protocol::handlerNopPacket(ImmutablePacket packet, size_t absolute_packet_size){
@@ -997,7 +1254,175 @@ void LEK_Protocol::handlerUsbMuxCtlPacket(ImmutablePacket packet, size_t absolut
 }
 
 void LEK_Protocol::handlerUsbSlavePowerCtlPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
+  //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
+  uint8_t power_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t power_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  uint8_t power_state = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  digitalWrite(LEK_USB_DEVICE_PWR_PIN, power_state);
 
+  //Send an ACK back
+  uint8_t *ack_packet = createAcknowledgement(return_address, power_sequence);
+  size_t ack_packet_size = determinePacketLength(ack_packet, LEK_MAX_PAYLOAD_SIZE);
+  rfmSendPacket((const uint8_t *)ack_packet, ack_packet_size);
+  free(ack_packet);
+}
+
+/* 
+*
+*
+*
+* Packet Utility Functions
+*
+*
+*
+*/
+String LEK_Protocol::getString(ImmutablePacket packet, uint8_t packet_string_length, uint8_t index){
+    char packet_string[LEK_MAX_NODE_NAME] = { 0 };
+    if (packet_string_length > LEK_MAX_NODE_NAME){
+        return String("");
+    }
+    memcpy(packet_string, packet+index, packet_string_length);
+    return String(packet_string);    
+}
+
+String LEK_Protocol::getNodeName(ImmutablePacket packet, uint8_t node_name_length, uint8_t index){
+    char node_name[LEK_MAX_NODE_NAME] = { 0 };
+    if (node_name_length > LEK_MAX_NODE_NAME){
+        return String("");
+    }
+    memcpy(node_name, packet+index, node_name_length);
+    return String(node_name);    
+}
+
+uint8_t LEK_Protocol::getUnsigned8(ImmutablePacket packet, uint8_t index){
+   return packet[index];
+}
+
+int8_t LEK_Protocol::getSigned8(ImmutablePacket packet, uint8_t index){
+    return static_cast<int8_t>(packet[index]);
+}
+
+int16_t LEK_Protocol::getSigned16(ImmutablePacket packet, uint8_t index){
+    union u16 {
+      uint8_t b[2];
+      uint16_t i;
+    } us;
+    us.b[0] = packet[index];
+    us.b[1] = packet[index+1];
+    return us.i;
+}
+
+uint16_t LEK_Protocol::getUnsigned16(ImmutablePacket packet, uint8_t index){
+    union u16 {
+      uint8_t b[2];
+      uint16_t ui16;
+    } us;
+    us.b[0] = packet[index];
+    us.b[1] = packet[index+1];
+    return us.ui16;
+}
+
+int32_t LEK_Protocol::getSigned32(ImmutablePacket packet, uint8_t index){
+  union s32 {
+    uint8_t b[4];
+    int32_t i;
+  } us;
+  us.b[0] = packet[index];
+  us.b[1] = packet[index+1];
+  us.b[2] = packet[index+2];
+  us.b[3] = packet[index+3];
+  return us.i;
+}
+
+
+uint32_t LEK_Protocol::getUnsigned32(ImmutablePacket packet, uint8_t index){
+  union u32 {
+    uint8_t b[4];
+    uint32_t ui32;
+  } us;
+  us.b[0] = packet[index];
+  us.b[1] = packet[index+1];
+  us.b[2] = packet[index+2];
+  us.b[3] = packet[index+3];
+  return us.ui32;
+}
+
+
+uint8_t LEK_Protocol::putNodeName(uint8_t packet[], uint8_t index, const char *node_name){
+    /* strnlen will cap the max value at LEK_MAX_NODE_NAME, even if it's malformed... */
+    uint8_t node_name_length = strnlen(node_name, LEK_MAX_NODE_NAME);
+    packet[index] = node_name_length;
+    for(int i = 0; i < node_name_length; i++){
+      packet[index+1+i] = node_name[i]; 
+    }
+    return node_name_length+1;
+}
+
+uint8_t LEK_Protocol::putString(uint8_t packet[], uint8_t index, const char *c_string){
+    /* The capping value here is pretty arbitrary, since a string long enough would still stomp any fields that proceeded it... */
+    uint8_t string_length = strnlen(c_string, LEK_MAX_PAYLOAD_SIZE-LEK_MINIMUM_MESSAGE_SIZE);
+    packet[index] = string_length;
+    for(int i = 0; i < string_length; i++){
+      packet[index+1+i] = c_string[i]; 
+    }
+    return string_length+1;
+}
+
+void LEK_Protocol::putSigned8(uint8_t packet[], uint8_t index, int8_t su8){
+    /* This is assigned to the unsigned array, so if negative, the value will be "wrong" when read
+     *  back. BUT, if the receiver of the packet is following the spec, then they should be able to
+     * get the correct value back out. It's not great, but it's not terrible?
+     */
+    packet[index] = static_cast<uint8_t>(su8);
+}
+
+void LEK_Protocol::putUnsigned8(uint8_t packet[], uint8_t index, uint8_t ui8){
+    packet[index] = ui8;
+}
+
+void LEK_Protocol::putSigned16(uint8_t packet[], uint8_t index, int16_t su16){
+    union s16 {
+      uint8_t b[2];
+      int16_t i;
+    } us;
+    us.i = su16;
+    packet[index] = us.b[0];
+    packet[index+1] = us.b[1];  
+}
+
+void LEK_Protocol::putUnsigned16(uint8_t packet[], uint8_t index, uint16_t ui16){
+    union u16 {
+      uint8_t b[2];
+      uint16_t i;
+    } us;
+    us.i = ui16;
+    packet[index] = us.b[0];
+    packet[index+1] = us.b[1];  
+}
+
+void LEK_Protocol::putSigned32(uint8_t packet[], uint8_t index, int32_t su32){
+    union s32 {
+      uint8_t b[4];
+      int32_t i;
+    } us;
+    us.i = su32;
+    packet[index] = us.b[0];
+    packet[index+1] = us.b[1];
+    packet[index+2] = us.b[2];
+    packet[index+3] = us.b[3];    
+}
+
+void LEK_Protocol::putUnsigned32(uint8_t packet[], uint8_t index, uint32_t ui32){
+    union u32 {
+      uint8_t b[4];
+      uint32_t i;
+    } us;
+    us.i = ui32;
+    packet[index] = us.b[0];
+    packet[index+1] = us.b[1];
+    packet[index+2] = us.b[2];
+    packet[index+3] = us.b[3];    
 }
 
 /* 
@@ -1033,162 +1458,22 @@ void signalFastBlink() {
   }
 }
 
-
-/* 
-*
-*
-*
-* Packet Utility Functions
-*
-*
-*
-*/
-String getString(uint8_t *packet, uint8_t packet_string_length, uint8_t index){
-    char packet_string[LEK_MAX_NODE_NAME] = { 0 };
-    if (packet_string_length > LEK_MAX_NODE_NAME){
-        return String("");
-    }
-    memcpy(packet_string, packet+index, packet_string_length);
-    return String(packet_string);    
+void signalLinkBlink() {
+  for (int c = 0; c < 3; c++) {
+    digitalWrite(LEK_LINK_LED_PIN, HIGH);
+    delay(50);
+    digitalWrite(LEK_LINK_LED_PIN, LOW);
+    delay(50);
+  }
 }
 
-String getNodeName(uint8_t *packet, uint8_t node_name_length, uint8_t index){
-    char node_name[LEK_MAX_NODE_NAME] = { 0 };
-    if (node_name_length > LEK_MAX_NODE_NAME){
-        return String("");
-    }
-    memcpy(node_name, packet+index, node_name_length);
-    return String(node_name);    
-}
-
-uint8_t getUnsigned8(uint8_t *packet, uint8_t index){
-   return packet[index];
-}
-
-int8_t getSigned8(uint8_t *packet, uint8_t index){
-    return static_cast<int8_t>(packet[index]);
-}
-
-int16_t getSigned16(uint8_t *packet, uint8_t index){
-    union u16 {
-      uint8_t b[2];
-      uint16_t i;
-    } us;
-    us.b[0] = packet[index];
-    us.b[1] = packet[index+1];
-    return us.i;
-}
-
-uint16_t getUnsigned16(uint8_t *packet, uint8_t index){
-    union u16 {
-      uint8_t b[2];
-      uint16_t ui16;
-    } us;
-    us.b[0] = packet[index];
-    us.b[1] = packet[index+1];
-    return us.ui16;
-}
-
-int32_t getSigned32(uint8_t *packet, uint8_t index){
-  union s32 {
-    uint8_t b[4];
-    int32_t i;
-  } us;
-  us.b[0] = packet[index];
-  us.b[1] = packet[index+1];
-  us.b[2] = packet[index+2];
-  us.b[3] = packet[index+3];
-  return us.i;
-}
-
-
-uint32_t getUnsigned32(uint8_t *packet, uint8_t index){
-  union u32 {
-    uint8_t b[4];
-    uint32_t ui32;
-  } us;
-  us.b[0] = packet[index];
-  us.b[1] = packet[index+1];
-  us.b[2] = packet[index+2];
-  us.b[3] = packet[index+3];
-  return us.ui32;
-}
-
-
-uint8_t putNodeName(uint8_t packet[], uint8_t index, const char *node_name){
-    /* strnlen will cap the max value at LEK_MAX_NODE_NAME, even if it's malformed... */
-    uint8_t node_name_length = strnlen(node_name, LEK_MAX_NODE_NAME);
-    packet[index] = node_name_length;
-    for(int i = 0; i < node_name_length; i++){
-      packet[index+1+i] = node_name[i]; 
-    }
-    return node_name_length+1;
-}
-
-uint8_t putString(uint8_t packet[], uint8_t index, const char *c_string){
-    /* The capping value here is pretty arbitrary, since a string long enough would still stomp any fields that proceeded it... */
-    uint8_t string_length = strnlen(c_string, LEK_MAX_PAYLOAD_SIZE-LEK_MINIMUM_MESSAGE_SIZE);
-    packet[index] = string_length;
-    for(int i = 0; i < string_length; i++){
-      packet[index+1+i] = c_string[i]; 
-    }
-    return string_length+1;
-}
-
-void putSigned8(uint8_t packet[], uint8_t index, int8_t su8){
-    /* This is assigned to the unsigned array, so if negative, the value will be "wrong" when read
-     *  back. BUT, if the receiver of the packet is following the spec, then they should be able to
-     * get the correct value back out. It's not great, but it's not terrible?
-     */
-    packet[index] = static_cast<uint8_t>(su8);
-}
-
-void putUnsigned8(uint8_t packet[], uint8_t index, uint8_t ui8){
-    packet[index] = ui8;
-}
-
-void putSigned16(uint8_t packet[], uint8_t index, int16_t su16){
-    union s16 {
-      uint8_t b[2];
-      int16_t i;
-    } us;
-    us.i = su16;
-    packet[index] = us.b[0];
-    packet[index+1] = us.b[1];  
-}
-
-void putUnsigned16(uint8_t packet[], uint8_t index, uint16_t ui16){
-    union u16 {
-      uint8_t b[2];
-      uint16_t i;
-    } us;
-    us.i = ui16;
-    packet[index] = us.b[0];
-    packet[index+1] = us.b[1];  
-}
-
-void putSigned32(uint8_t packet[], uint8_t index, int32_t su32){
-    union s32 {
-      uint8_t b[4];
-      int32_t i;
-    } us;
-    us.i = su32;
-    packet[index] = us.b[0];
-    packet[index+1] = us.b[1];
-    packet[index+2] = us.b[2];
-    packet[index+3] = us.b[3];    
-}
-
-void putUnsigned32(uint8_t packet[], uint8_t index, uint32_t ui32){
-    union u32 {
-      uint8_t b[4];
-      uint32_t i;
-    } us;
-    us.i = ui32;
-    packet[index] = us.b[0];
-    packet[index+1] = us.b[1];
-    packet[index+2] = us.b[2];
-    packet[index+3] = us.b[3];    
+/* TODO: Uggggggggggggghhhhhh */
+uint8_t LEK_Protocol::getGlobalSequence(){
+  _global_sequence++;
+  if (_global_sequence > 255){
+    _global_sequence = 0;
+  }
+  return _global_sequence;
 }
 
 /* 
@@ -1238,7 +1523,6 @@ void execute_test_usb_driveby_windows(){
 void execute_test_usb_driveby_osx(){
   openappMacOs("Terminal");
   delay(DELAY_RATE);
-  Keyboard.println("i have compromised this system.");
 }
 
 // Open an application on Windows via Run
@@ -1407,8 +1691,6 @@ void executeUsbDriveByOsX(){
 void typeln(String chars){
   Keyboard.print(chars);
   delay(DELAY_RATE);
-  Keyboard.println("");
-  delay(DELAY_RATE * 4);
 }
 
 // open an application on OS X via spotlight/alfred
@@ -1417,6 +1699,11 @@ void openappMacOs(String app){
   cmd(' ');
   typeln(app);
   k(KEY_RETURN);
+}
+
+/* Will only quit whatever is in the foreground... */
+void quitAppMacOs(){
+  cmd('q');
 }
 
 void clickOutOfLittleSnitch(){

@@ -43,11 +43,13 @@ enum ScriptStorageLocation {
 
 enum GatewayConsoleState
 {
-    kCONSOLE_STATE_MAIN_MENU,
-    kCONSOLE_STATE_SCANNING,
-    kCONSOLE_STATE_PAIRING,
-    kCONSOLE_STATE_RECEIVING,
-    kCONSOLE_STATE_CLOSED
+    kCONSOLE_STATE_NO_STATE = 0,
+    kCONSOLE_STATE_MAIN_MENU = 1,
+    kCONSOLE_STATE_SCANNING = 2,
+    kCONSOLE_STATE_PAIRING = 3,
+    kCONSOLE_STATE_RECEIVING = 4,
+    kCONSOLE_STATE_PARSING_COMMAND = 5,
+    kCONSOLE_STATE_CLOSED = 6
 };
 
 enum ReceiverReceiveState
@@ -148,27 +150,12 @@ class LedControl {
  private:
 };
 
-/* TODO: This is very C... And, it could probably be made more C++y. */
-String getString(uint8_t *packet, uint8_t packet_string_length, uint8_t index);
-String getNodeName(const uint8_t *packet, uint8_t node_name_length, uint8_t index);
-uint8_t getUnsigned8(const uint8_t *packet, uint8_t index);
-int8_t getSigned8(const uint8_t *packet, uint8_t index);
-int16_t getSigned16(const uint8_t *packet, uint8_t index);
-uint16_t getUnsigned16(const uint8_t *packet, uint8_t index);
-int32_t getSigned32(const uint8_t *packet, uint8_t index);
-uint32_t getUnsigned32(const uint8_t *packet, uint8_t index);
-
-uint8_t putNodeName(uint8_t packet[], uint8_t index, const char *node_name);
-uint8_t putString(uint8_t packet[], uint8_t index, const char *c_string);
-void putSigned8(uint8_t packet[], uint8_t index, int8_t su8);
-void putUnsigned8(uint8_t packet[], uint8_t index, uint8_t ui8);
-void putSigned16(uint8_t packet[], uint8_t index, int16_t su16);
-void putUnsigned16(uint8_t packet[], uint8_t index, uint16_t ui16);
-void putSigned32(uint8_t packet[], uint8_t index, int32_t su32);
-void putUnsigned32(uint8_t packet[], uint8_t index, uint32_t ui32);
-
+/* TODO: Refactor to the fancy pants async LED control that's in the design doc... */
 void signalFaultTrap();
 void signalFastBlink();
+void signalLinkBlink();
+
+
 
 /* TODO: Implement proper end to end encryption with the ATAES132 */
 uint8_t writeKey();
@@ -189,6 +176,7 @@ void execute_usb_driveby_windows();
 void executeUsbDriveByOsX();
 void typeln(String chars);
 void openappMacOs(String app);
+void quitAppMacOs();
 void clickOutOfLittleSnitch();
 void pwnLittleSnitch(bool _pwn_little_snitch_with_mouse);
 
@@ -204,6 +192,9 @@ class LEK_Protocol {
   void updateConsoleState(GatewayConsoleState state);
   void displayConsoleStartupMessage();
   void clearTerminal();
+  void displayDividerLine();
+  void getConsoleCommand();
+  void parseConsoleCommand(String command_in);
 
   void reloadParametersFromEEPROM();
 
@@ -226,6 +217,25 @@ class LEK_Protocol {
   uint8_t rtcTicksEvent();
   uint8_t serialInterfaceReceiveEvent();
 
+  /* TODO: This is very C... And, it could probably be made more C++y. */
+  String getString(ImmutablePacket packet, uint8_t packet_string_length, uint8_t index);
+  String getNodeName(ImmutablePacket packet, uint8_t node_name_length, uint8_t index);
+  uint8_t getUnsigned8(ImmutablePacket packet, uint8_t index);
+  int8_t getSigned8(ImmutablePacket packet, uint8_t index);
+  int16_t getSigned16(ImmutablePacket packet, uint8_t index);
+  uint16_t getUnsigned16(ImmutablePacket packet, uint8_t index);
+  int32_t getSigned32(ImmutablePacket packet, uint8_t index);
+  uint32_t getUnsigned32(ImmutablePacket packet, uint8_t index);
+
+  uint8_t putNodeName(uint8_t *packet, uint8_t index, const char *node_name);
+  uint8_t putString(uint8_t *packet, uint8_t index, const char *c_string);
+  void putSigned8(uint8_t *packet, uint8_t index, int8_t su8);
+  void putUnsigned8(uint8_t *packet, uint8_t index, uint8_t ui8);
+  void putSigned16(uint8_t *packet, uint8_t index, int16_t su16);
+  void putUnsigned16(uint8_t *packet, uint8_t index, uint16_t ui16);
+  void putSigned32(uint8_t *packet, uint8_t index, int32_t su32);
+  void putUnsigned32(uint8_t *packet, uint8_t index, uint32_t ui32);
+
   /* TODO: This could use some refactoring to something a bit less cumbersome... Make it more C++y. */
   uint8_t *createBeacon(DeviceMode mode, const char* node_name, uint8_t network_address, uint32_t uptime_ticks, uint8_t software_version);
   uint8_t *createAcknowledgement(uint8_t message_address, uint8_t message_sequence);
@@ -234,6 +244,7 @@ class LEK_Protocol {
   uint8_t *createModifierPress(uint8_t message_address, uint8_t message_sequence, int modifier_key, int key);
   uint8_t *createLinePress(uint8_t message_address, uint8_t message_sequence, const char* line_to_press, size_t line_length, bool terminate_crlf);
   uint8_t *createMouseMove(uint8_t message_address, uint8_t message_sequence, int x, int y, int speed, int delay);
+  uint8_t *createMouseClick(uint8_t message_address, uint8_t message_sequence, int button_to_click);  
   uint8_t *createSetTime(uint8_t message_address, uint8_t message_sequence, uint32_t current_time);
   uint8_t *createPackLine(uint8_t message_address, uint8_t message_sequence, const char* line_byte_code, size_t line_length);
   uint8_t *createPackScript(uint8_t message_address, uint8_t message_sequence, uint8_t chunk_sequence, const uint8_t *chunk_byte_code);
@@ -260,7 +271,7 @@ class LEK_Protocol {
 
   void openTransaction();
   /* There isn't any work to do for Transaction objects. They're really just holders of static data
-  so we can historically track transactions. */
+  so we can historically track transactions in a vector. */
   void collectTransactions();
 
   void openLedControl();
@@ -268,7 +279,8 @@ class LEK_Protocol {
   void collectLedControls();
 
   void openBeacon();
-  /* There isn't any work to do for Beacon objects. They're really just holders of static data. */
+  /* There isn't any work to do for Beacon objects. They're really just holders of static data
+  so we can historically track beacons in a vector. */
   void collectBeacons();
 
   /* TODO: This could use some refactoring to something a bit less cumbersome... */
@@ -280,6 +292,7 @@ class LEK_Protocol {
   void handlerModifierPressPacket(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerLinePressPacket(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerMouseMovePacket(ImmutablePacket packet, size_t absolute_packet_size);
+  void handlerMouseClickPacket(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerSetTimePacket(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerPackLinePacket(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerPackScriptPacket(ImmutablePacket packet, size_t absolute_packet_size);
@@ -301,6 +314,8 @@ class LEK_Protocol {
 
   void setSystemTime(byte seconds, byte minutes, byte hours, byte day, byte month, byte year);
   uint64_t getSystemTime(void);
+
+  uint8_t getGlobalSequence();
 
   /* TODO: This ticker will overflow in 49.1 days if it's not cycled off into another variable at another rate. 
   Beacons don't REALLY need their own timer... But, whatever. */
@@ -331,7 +346,7 @@ class LEK_Protocol {
   EventCallbackFunction _event_callbacks[LEK_NUMBER_OF_EVENT_CALLBACKS];
   EventType _registered_events[LEK_NUMBER_OF_REGISTERABLE_EVENTS];
   
-  std::unique_ptr<RH_RF95> _rf_module;
+  RH_RF95 *_rf_module;
   QueueList<uint8_t*> _recv_packet_buffer;
   QueueList<uint8_t*> _send_packet_buffer;
   /* Protocol Controls */

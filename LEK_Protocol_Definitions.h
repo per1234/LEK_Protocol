@@ -1,6 +1,9 @@
 #ifndef LEK_PROTOCOL_DEFINITIONS_H
 #define LEK_PROTOCOL_DEFINITIONS_H
 
+#define LEK_DEFAULT_GATEWAY_ADDRESS 0x01
+#define LEK_DEFAULT_RECEIVER_ADDRESS  0x02
+
 /* Pins */
 #define LEK_RFM_CS_PIN					16
 #define LEK_RFM_INT_PIN					10
@@ -27,6 +30,9 @@
 But, we could not stuff an entire script (4096), as that would be fairly ridiculous to pull off
 in a single command anyway... */
 #define LEK_MAX_CONSOLE_BUFFER			512
+#define LEK_CONSOLE_DIVIDING_LINE_LENGTH  32
+#define LEK_MAX_CONSOLE_TOKENIZED_ARGUMENTS 16
+#define LEK_MAX_COMMAND_LENGTH LEK_MAX_CONSOLE_BUFFER/2
 #define LEK_MAX_BEACONS_NEARBY			4
 #define LEK_NUMBER_OF_EVENT_CALLBACKS	4
 #define LEK_MAX_ACTIVE_TRANSACTIONS		4
@@ -108,30 +114,36 @@ modkey - <int address> <int mod key> <int key> send a mod+key to a particular no
 mouse - <int address> <int x> <int y> <int rate> send a mouse movement to a particular node
 line - <int address> <string line> send a line to type to a particular node
 event - <int address> <event type> <event slot> <callback id> register a (pre-baked only) event on a particular node
+stats - display any and all system statistics
 */
 
-#define kCONSOLE_SEND 			"send"
-#define kCONSOLE_SCAN 			"scan"
-#define kCONSOLE_BEACON 		"beacon"
-#define kCONSOLE_PAIR 			"pair"
-#define kCONSOLE_RECEIVE 		"receive"
-#define kCONSOLE_CLEAR			"clear"
-#define kCONSOLE_SET			"set"
-#define kCONSOLE_GET			"get"
-#define kCONSOLE_RADIO			"radio"
-#define kCONSOLE_SLEEP			"sleep"
-#define kCONSOLE_PIN			"pin"
-#define kCONSOLE_PINMODE		"pinmode"
-#define kCONSOLE_SAVE			"save"
-#define KCONSOLE_HELP			"help"
-#define kCONSOLE_RESET			"reset"
-#define kCONSOLE_VERSION		"version"
-#define kCONSOLE_INTERACTIVE	"interactive"
-#define kCONSOLE_KEY			"key"
-#define kCONSOLE_MODKEY			"modkey"
-#define kCONSOLE_MOUSE			"mouse"
-#define kCONSOLE_LINE			"line"
-#define kCONSOLE_EVENT			"event"
+#define LEK_CONSOLE_SEND 			"send"
+#define LEK_CONSOLE_SCAN 			"scan"
+#define LEK_CONSOLE_BEACON 		"beacon"
+#define LEK_CONSOLE_PAIR 			"pair"
+#define LEK_CONSOLE_RECEIVE 		"receive"
+#define LEK_CONSOLE_CLEAR			"clear"
+#define LEK_CONSOLE_SET			"set"
+#define LEK_CONSOLE_GET			"get"
+#define LEK_CONSOLE_RADIO			"radio"
+#define LEK_CONSOLE_SLEEP			"sleep"
+#define LEK_CONSOLE_PIN			"pin"
+#define LEK_CONSOLE_PINMODE		"pinmode"
+#define LEK_CONSOLE_SAVE			"save"
+#define LEK_CONSOLE_HELP			"help"
+#define LEK_CONSOLE_RESET			"reset"
+#define LEK_CONSOLE_VERSION		"version"
+#define LEK_CONSOLE_INTERACTIVE	"interactive"
+#define LEK_CONSOLE_KEY			"key"
+#define LEK_CONSOLE_MODKEY			"modkey"
+#define LEK_CONSOLE_MOUSE			"mouse"
+#define LEK_CONSOLE_CLICK     "click"
+#define LEK_CONSOLE_LINE			"line"
+#define LEK_CONSOLE_EVENT			"event"
+#define LEK_CONSOLE_STATS    "stats"
+#define LEK_CONSOLE_ROUTINE    "routine"
+#define LEK_CONSOLE_SLAVE_POWER "power"
+#define LEK_CONSOLE_SLAVE_MUX    "mux"
 
 /*
   Scripts
@@ -296,62 +308,66 @@ event - <int address> <event type> <event slot> <callback id> register a (pre-ba
 //Encrypted - Format: [2sb] X Positions To Move [2sb] Y Positions To Move [2sb] Scroll Wheel Positions To Move
 #define LEK_RECEIVER_MOUSE_MOVE           			 0x15
 
+//Command Receiver to send a mouse click where ever the cursor is located
+//Encrypted - Format: [1] Button to click (defaults to LEFT)
+#define LEK_RECEIVER_MOUSE_CLICK                 0x16
+
 //Command Receiver to set it's internal RTC
 // Encrypted - Format: [4b] Epoch Time To Set
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SET_TIME           			 0x16
+#define LEK_RECEIVER_SET_TIME           			 0x17
 
 //Command Receiver to pack a line
 // Encrypted - Format: [1b] Base ID [1b] Storage Index [1b] Script Index [1b] Mode [1b] Payload Size [nb] Payload
-#define LEK_RECEIVER_PACK_LINE          			 0x17
+#define LEK_RECEIVER_PACK_LINE          			 0x18
 
 //Command Receiver to pack a script
 // Encrypted - Format: [1b] Base ID [1b] Storage Index [1b] Storage Location [1b] Script Index [1b] Mode [1b] Payload Size [nb] Payload
-#define LEK_RECEIVER_PACK_SCRIPT          			 0x18
+#define LEK_RECEIVER_PACK_SCRIPT          			 0x19
 
 //Command Receiver to schedule a packed script
 // Encrypted - Format: [1b] Base ID [1b] Storage Index [1b] Storage Location [1b] Immediate/Scheduled/After Ticks [4b] Epoch Time To Execute/Execute After Ticks
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SCHEDULE_SCRIPT        		 0x19
+#define LEK_RECEIVER_SCHEDULE_SCRIPT        		 0x1A
 
 //Command Receiver to request a status packet from the receiver addressed
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with Status Response (if available)
-#define LEK_RECEIVER_STATUS_REQUEST         		 0x1A
+#define LEK_RECEIVER_STATUS_REQUEST         		 0x1B
 
 //Command Receiver to setup an event trigger
 // Encrypted - Format: [1b] Storage Index [1b] Event Trigger [1b] Activate Immediately/Activate After Ticks/Activate At Time [4b] Epoch Time To Activate 
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SET_EVENT_TRIGGER        		 0x1B
+#define LEK_RECEIVER_SET_EVENT_TRIGGER        		 0x1C
 
 //Command Receiver to clear all loaded scripts, lines and time
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with ACK/NACK
-#define LEK_RECEIVER_CLEAR_LOADS          			 0x1C
+#define LEK_RECEIVER_CLEAR_LOADS          			 0x1D
 
 //Command Receiver to reboot (but not destroy)
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with ACK/NACK
-#define LEK_RECEIVER_RESET              			 0x1D
+#define LEK_RECEIVER_RESET              			 0x1E
 
 //Command receiver to reboot and destroy
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with ACK/NACK
-#define LEK_RECEIVER_SCUTTLE            			 0x1E
+#define LEK_RECEIVER_SCUTTLE            			 0x1F
 
 //Command Receiver to send it's schedule
 // Encrypted - Format: [1b] 0x01 (Reserved)
 // Responds with Schedule
-#define LEK_RECEIVER_SCHEDULE_REQUEST       		 0x1F
+#define LEK_RECEIVER_SCHEDULE_REQUEST       		 0x20
 
 //Command Receiver to send to execute a static interally baked routine
 // Encrypted - Format: [1b] Routine Index To Execute
 // Responds with ACK/NACK
-#define LEK_RECEIVER_EXECUTE_BAKED_ROUTINE			 0x20
+#define LEK_RECEIVER_EXECUTE_BAKED_ROUTINE			 0x21
 
 /* Requests an ACK from the gateway, this operation is a nop */
 // Encrypted - Format: [1b] Reserved
-#define LEK_RECEIVER_NOP							 0x21
+#define LEK_RECEIVER_NOP							 0x22
 
 //Command receiver to do something to the USB MUX
 // Encrypted - Format: [1ub] MUX Device
