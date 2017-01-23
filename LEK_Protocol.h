@@ -1,15 +1,29 @@
 #ifndef _LEK_PROTOCOL_H_
 #define _LEK_PROTOCOL_H_
 
+#include <stdlib.h>
+#include <stdint.h>
+/* 
+The Arduino.h defines max and min macros which don't jive with the stl/memory. More info here.
+http://stackoverflow.com/questions/41093090/esp8266-error-macro-min-passed-3-arguments-but-takes-just-2
+*/
+#undef min
+#undef max
+#include <memory>
+#include <vector>
 #include <RH_RF95.h>
 #include <elapsedMillis.h>
 #include <QueueList.h>
+
 #include "LEK_Protocol_Definitions.h"
+#include "Beacon.h"
+
+/* TODO: This class is horrendously massive, and can/should be reduced into smaller chunks for easier readability. */
 
 /*
 Style Guide: 
-Typedefs, and Enums: Leading capital CamelCase. Enums start with a lowercase k.
-Defines: All capitals, underscores as spaces. All defines are prefixed with LEK_.
+Typedefs, Enums and Classes: Leading capital CamelCase. Enums start with a lowercase k.
+Defines: All capitals, underscores as spaces. All our defines are prefixed with LEK_.
 Functions: Leading lowercase camelCase.
 Vars: All lowercase, underscores as spaces.
 Global vars: Same as vars, but with a leading underscore.
@@ -92,35 +106,47 @@ typedef const uint8_t* ImmutablePacket;
 /* This is the structure that's created by the ScriptMap parser so that the script executor can
 do it's thing. */
 
-typedef struct {
-    uint8_t storage_position;
-    uint8_t lines;
-    uint8_t line_sizes[LEK_MAX_SCRIPT_LINES];
-    uint8_t line_commands[LEK_MAX_SCRIPT_LINES];
-} ScriptMap;
+class ScriptMap {
+ public:
+  ScriptMap(/* TODO: Evaluate the efficacy of this solution. We don't pass in the values to the ScriptMap constructor, it loads them from EEPROM
+  itself internally. */);
+  ~ScriptMap();
+  uint8_t storage_position;
+  uint8_t lines;
+  uint8_t line_sizes[LEK_MAX_SCRIPT_LINES];
+  uint8_t line_commands[LEK_MAX_SCRIPT_LINES];  
+ private:
+};
 
 /* Transactions are created when the system needs to monitor for asynchronous messages,
-they have a lifetime assigned to them for when they will be cleaned up. They are stored 
-on the heap, with references inside an array. */
+they have a lifetime assigned to them for when they will be cleaned up. */
 
-typedef struct {
-    uint8_t sequence;
-    uint8_t source_type;
-    uint8_t acceptance_type;
-    uint32_t initialization_time;
-    uint32_t lifetime;
-    bool authenticated;
-    bool mark_for_destruction;
-    TransactionType transaction_type;
-} Transaction;
+class Transaction {
+ public:
+  Transaction(uint8_t sequence, uint8_t source_type, uint8_t acceptance_type, uint32_t initialization_time, uint32_t lifetime, bool authenticated, bool mark_for_destruction);
+  ~Transaction();
+  uint8_t sequence;
+  uint8_t source_type;  
+  uint8_t acceptance_type;
+  uint32_t initialization_time;
+  uint32_t lifetime;
+  bool authenticated;
+  bool mark_for_destruction;
+ private:
+};
 
 /* These are created when a service wants to blink one of the LEDs asynchronously. */
 
-typedef struct {
-    uint8_t led_pin;
-    uint32_t lifetime;
-    uint32_t blink_rate;
-} LedControl;
+class LedControl {
+ public:
+  LedControl(uint8_t led_pin, uint32_t lifetime, uint32_t initialization_time, uint32_t blink_rate);
+  ~LedControl();
+  uint8_t led_pin;
+  uint32_t lifetime;
+  uint32_t initialization_time;
+  uint32_t blink_rate;
+ private:
+};
 
 /* TODO: This is very C... And, it could probably be made more C++y. */
 String getString(uint8_t *packet, uint8_t packet_string_length, uint8_t index);
@@ -200,6 +226,7 @@ class LEK_Protocol {
   uint8_t rtcTicksEvent();
   uint8_t serialInterfaceReceiveEvent();
 
+  /* TODO: This could use some refactoring to something a bit less cumbersome... Make it more C++y. */
   uint8_t *createBeacon(DeviceMode mode, const char* node_name, uint8_t network_address, uint32_t uptime_ticks, uint8_t software_version);
   uint8_t *createAcknowledgement(uint8_t message_address, uint8_t message_sequence);
   uint8_t *createAcknowledgement(uint8_t message_address, uint8_t message_sequence, uint8_t error_code);
@@ -232,16 +259,19 @@ class LEK_Protocol {
   uint32_t generateCurrentTime();
 
   void openTransaction();
-  void workTransaction();
-  void closeTransaction();
+  /* There isn't any work to do for Transaction objects. They're really just holders of static data
+  so we can historically track transactions. */
   void collectTransactions();
 
   void openLedControl();
-  void workLedControl();
-  void closeLedControl();
+  void workLedControls();
   void collectLedControls();
 
-  /* TODO: This could use a refactoring to something a bit less cumbersome... */
+  void openBeacon();
+  /* There isn't any work to do for Beacon objects. They're really just holders of static data. */
+  void collectBeacons();
+
+  /* TODO: This could use some refactoring to something a bit less cumbersome... */
   void routePacketToHandler(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerBeaconPacket(ImmutablePacket packet, size_t absolute_packet_size);
   void handlerAckPacket(ImmutablePacket packet, size_t absolute_packet_size);
@@ -274,8 +304,11 @@ class LEK_Protocol {
 
   /* TODO: This ticker will overflow in 49.1 days if it's not cycled off into another variable at another rate. 
   Beacons don't REALLY need their own timer... But, whatever. */
-  elapsedMillis uptime_ticks_actual;
-  elapsedMillis beacon_ticks;
+
+  /* Statistics */
+  uint64_t _uptime_ticks;
+  uint16_t _count_of_failed_packet_receives;
+  int8_t _last_rssi;
 
  private:
   DeviceMode _mode;
@@ -288,11 +321,9 @@ class LEK_Protocol {
   bool _radio_state;
   uint16_t _tick_rate;
 
-  /* Statistics */
-  uint64_t _uptime_ticks;
-  int8_t _last_rssi;
-  uint16_t _count_of_failed_packet_receives;
-  
+  elapsedMillis _uptime_ticks_actual;
+  elapsedMillis _beacon_ticks;
+
   GatewayConsoleState _console_state;
   GatewayConsoleState _last_console_state;
   String _console_buffer;
@@ -300,17 +331,18 @@ class LEK_Protocol {
   EventCallbackFunction _event_callbacks[LEK_NUMBER_OF_EVENT_CALLBACKS];
   EventType _registered_events[LEK_NUMBER_OF_REGISTERABLE_EVENTS];
   
-  RH_RF95 *_rf_module;
+  std::unique_ptr<RH_RF95> _rf_module;
   QueueList<uint8_t*> _recv_packet_buffer;
   QueueList<uint8_t*> _send_packet_buffer;
   /* Protocol Controls */
-  uint8_t _beacons_nearby[LEK_MAX_BEACONS_NEARBY];
-  uint8_t _count_of_beacons_nearby;
+  std::vector<Beacon> _beacons_nearby;
 
-  /* Statically allocated buffers, you say? */
-  char _temp_script[LEK_MAX_SCRIPT_SIZE];
+  uint8_t _temp_script[LEK_MAX_SCRIPT_SIZE];
 
-  /* TODO: Reimplement the radio layer using RHDatagrams & Addresses */
+  void tickUptime();
+  void tickBeacon();
+
+  /* TODO: Reimplement the radio layer in a cleaner way */
   void rfmReset();
   void rfmSetup();
   void rfmSendPacket(const uint8_t *packet, uint8_t packet_length);

@@ -20,8 +20,9 @@
 #include <RH_RF95.h>
 #include <elapsedMillis.h>
 
+#include <Arduino.h>
 
-#include "Arduino.h"
+#include "Beacon.h"
 #include "LEK_Protocol.h"
 #include "LEK_Protocol_Definitions.h"
 
@@ -38,7 +39,7 @@ LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, u
   SPI.begin();
   Serial.begin(LEK_DEFAULT_SERIAL_BAUD_RATE);
   Serial.setTimeout(LEK_DEFAULT_SERIAL_TIMEOUT);
-  this->_rf_module = new RH_RF95(LEK_RFM_CS_PIN, LEK_RFM_INT_PIN);
+  std::unique_ptr<RH_RF95> _rf_module(new RH_RF95(LEK_RFM_CS_PIN, LEK_RFM_INT_PIN));
 
   pinMode(LEK_LINK_LED_PIN, OUTPUT);
   pinMode(LEK_HB_LED_PIN, OUTPUT);
@@ -47,12 +48,11 @@ LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, u
 
   pinMode(LEK_RFM_RESET_PIN, INPUT_PULLUP);
 
-  this->rfmReset();
+  rfmReset();
   delay(100);
-  this->rfmSetup();
+  rfmSetup();
 
   Serial.println("I did it!!!!");
-  
 
   _global_sequence = 0;
   _network_address = user_network_address;
@@ -114,7 +114,6 @@ LEK_Protocol::LEK_Protocol(DeviceMode user_mode, uint8_t user_network_address, u
 }
 
 LEK_Protocol::~LEK_Protocol(){
-  delete _rf_module;
 }
 
 void LEK_Protocol::begin() {
@@ -135,11 +134,13 @@ void LEK_Protocol::spin(){
       Authenticate packet from FIFO
       Parse packet pulled from FIFO
       If message requires spin hotwire, then execute respin
-      If message matches any acceptance type and sequences on a transaction, mark for destruction
+      If message matches the acceptance type && sequence on a transaction, mark for destruction
     Do Transactions work
     Garbage collect Transactions
     Do LEDControls work
     Garbage collect LED Controls
+    Do Beacons work
+    Garbage collect Beacons
     Check timer ticks for event triggers
     Check RTC ticks for event triggers
     Check for incoming serial message
@@ -148,7 +149,32 @@ void LEK_Protocol::spin(){
       If console mode, update console state
       If gateway master mode, update internal state/execute command
       If unpaired mode, accept setup data
+    Tick uptime timer
+    Tick beacon timer
   */
+  tickUptime();
+  tickBeacon();
+}
+
+void LEK_Protocol::tickUptime(){
+  /* This timing system isn't perfect, as obviously there is time lost in the main loop in between
+  tick count checks. However, that time should have a slight but minimal impact on the system. And, most importantly
+  the user script task is the highest priority, and are capable of the sometimes tight timing needed for
+  obscure exploits. */
+  if (_uptime_ticks_actual > LEK_DEFAULT_BEACON_TICK_RATE){
+      _uptime_ticks++;
+      _uptime_ticks_actual = 0;
+  }
+}
+
+void LEK_Protocol::tickBeacon(){
+  if (_beacon_ticks > LEK_DEFAULT_BEACON_TICK_RATE){
+      //If Beacons are enabled, emit one!
+      if (_beaconing){
+        //emitBeacon();
+      }
+      _beacon_ticks = 0;
+  }
 }
 
 void LEK_Protocol::reloadParametersFromEEPROM(){
@@ -502,9 +528,8 @@ uint8_t *LEK_Protocol::createLinePress(uint8_t message_address, uint8_t message_
   putUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX, message_sequence); 
   putUnsigned32(packet, LEK_MESSAGE_SALT_INDEX, generateMessageSalt());
   putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START, terminate_crlf); /* Implicit cast bool to uint8_t */
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, line_length);
-  uint8_t index_offset = putString(packet, LEK_MESSAGE_PAYLOAD_START+2, line_to_press);
-  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+2, LEK_RESERVED_MESSAGE_TERMINATOR);
+  uint8_t index_offset = putString(packet, LEK_MESSAGE_PAYLOAD_START+1, line_to_press);
+  putUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+1, LEK_RESERVED_MESSAGE_TERMINATOR);
   return packet;
 }
 
@@ -680,7 +705,8 @@ bool LEK_Protocol::validatePacket(ImmutablePacket packet, size_t absolute_packet
 void LEK_Protocol::printPacketASCII(ImmutablePacket packet, size_t absolute_packet_size){
   Serial.println("PACKET>");
   for (int i = absolute_packet_size; i < absolute_packet_size; i++){
-    Serial.print(packet[i], HEX);  
+    Serial.print(packet[i], HEX);
+    Serial.print(" ");  
   }
   Serial.println("<PACKET");
 }
@@ -704,18 +730,37 @@ uint32_t LEK_Protocol::generateCurrentTime(){
    return 0xFFFFFFFF;
 }
 
-void collectTransaction(){
-
-}
-
 void openTransaction(){
 
 }
 
-void closeTransaction(){
+void collectTransactions(){
+  /* Check to see what Transactions are over lifetime. If so, destroy them! And, alert the user
+  that their transaction failed to internet the ethernet cables. */
+}
+
+void openLedControl(){
 
 }
 
+void workLedControls(){
+
+}
+
+void collectLedControls(){
+  /* Check to see what LedControls are over lifetime. If so, destroy them! */
+}
+
+void openBeacon(){
+
+}
+
+void collectBeacons(){
+  /* Check to see what Beacons are over lifetime. If so, destroy them! */
+}
+
+
+/* TODO: Giant switch of DOOOOOOOOOOOOOM. */
 void LEK_Protocol::routePacketToHandler(ImmutablePacket packet, size_t absolute_packet_size){
   /* The packet is validated via CRC16 before reaching this, so it's "safe" to assume good data. */
   switch (packet[0]) 
@@ -814,7 +859,10 @@ void LEK_Protocol::handlerBeaconPacket(ImmutablePacket packet, size_t absolute_p
   uint32_t uptime_ticks = getUnsigned32(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length+1);
   uint8_t software_version = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+node_name_length+5);
   //uint8_t message_terminator = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+index_offset+6, LEK_RESERVED_MESSAGE_TERMINATOR);
-  //Add this to 'beacons nearby'
+  /* Search the _beacons_nearby vector for a beacon that matches the node_name of this Beacon. If you don't find one, add it to the list.
+  If you do find it, you should destroy that one and pop this one into the list. */
+  _beacons_nearby.push_back(Beacon(beacon_type, node_name, network_address, uptime_ticks, software_version, _uptime_ticks, _last_rssi));
+
 }
 
 void LEK_Protocol::handlerAckPacket(ImmutablePacket packet, size_t absolute_packet_size){
@@ -831,11 +879,11 @@ void LEK_Protocol::handlerAckPacket(ImmutablePacket packet, size_t absolute_pack
   //Nothing to do here either... just the message terminator.
   //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1, LEK_RESERVED_MESSAGE_TERMINATOR);
 
-  //Mark the transaction that this is associated with as COMPLETE.
+  //Mark the transaction that this is associated with as COMPLETE/SUCCESS.
 }
 
 void LEK_Protocol::handlerKeyPressPacket(ImmutablePacket packet, size_t absolute_packet_size){
-  //Nothing to do here... message type.
+  uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
   //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);    
   uint8_t key_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
   uint32_t key_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
@@ -843,10 +891,12 @@ void LEK_Protocol::handlerKeyPressPacket(ImmutablePacket packet, size_t absolute
   //Nothing to do here either... just the message terminator.
   //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
   k(key);
+
+  //Send an ACK back
 }
 
 void LEK_Protocol::handlerModifierPressPacket(ImmutablePacket packet, size_t absolute_packet_size){
-  //Nothing to do here... message type.
+  uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
   //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
   uint8_t key_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
   uint32_t key_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
@@ -855,10 +905,23 @@ void LEK_Protocol::handlerModifierPressPacket(ImmutablePacket packet, size_t abs
   //Nothing to do here either... just the message terminator.
   //getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
   mod(mod_key, key);
+
+  //Send an ACK back
 }
 
 void LEK_Protocol::handlerLinePressPacket(ImmutablePacket packet, size_t absolute_packet_size){
+  uint8_t return_address = getUnsigned8(packet, LEK_MESSAGE_ADDRESS_INDEX);
+  //getUnsigned8(packet, LEK_MESSAGE_TYPE_INDEX);  
+  uint8_t line_sequence = getUnsigned8(packet, LEK_MESSAGE_SEQUENCE_INDEX); 
+  uint32_t line_salt = getUnsigned32(packet, LEK_MESSAGE_SALT_INDEX);
+  bool line_terminate_crlf = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START);
+  uint8_t line_length = getUnsigned8(packet, LEK_MESSAGE_PAYLOAD_START+1);
+  char line[LEK_MAX_LINE_LENGTH] = { 0 };
+  strncpy(line, (char *)packet+LEK_MESSAGE_PAYLOAD_START+1, sizeof(line)-1);
+  String line_s = line;
+  typeln(line_s);
 
+  //Send an ACK back
 }
 
 void LEK_Protocol::handlerMouseMovePacket(ImmutablePacket packet, size_t absolute_packet_size){

@@ -16,8 +16,10 @@
 #define LEK_MINIMUM_MESSAGE_SIZE  		6
 #define LEK_MAX_NODE_NAME         		20
 #define LEK_INCOMING_PACKET_FIFO_SIZE	16
-#define LEK_DEFAULT_TICK_RATE			1000
+#define LEK_DEFAULT_TICK_RATE			    1000
+#define LEK_DEFAULT_BEACON_TICK_RATE  30000
 #define LEK_DEFAULT_COMMAND_DELAY_RATE 	500
+#define LEK_DEFAULT_BEACON_LIFETIME   120
 #define DELAY_RATE  					LEK_DEFAULT_COMMAND_DELAY_RATE
 #define LEK_DEFAULT_SERIAL_BAUD_RATE	9600
 #define LEK_DEFAULT_SERIAL_TIMEOUT		1500
@@ -30,6 +32,7 @@ in a single command anyway... */
 #define LEK_MAX_ACTIVE_TRANSACTIONS		4
 #define LEK_MAX_ACTIVE_LED_CONTROLS		2
 #define LEK_MAX_UUID_LENGTH				64
+#define LEK_MAX_LINE_LENGTH       196
 
 /* Ducky script root list! */
 enum DuckyScriptCmdDefinition
@@ -81,30 +84,30 @@ enum ExtendedDuckyScriptCmdDefinition
 
 /* 
 Console command definitions 
-send - send a specific packet defined
-scan - display all beacons received
-beacon - set beaconing rate, 0 is "off"
-pair - initiate a pairing sequence
-receive - wait for a packet and display it
-clear - clear all buffers
-set - set parameter value
-get - get parameter value
-radio - start/stop the radio
-sleep - allow the system to sleep for a uint32_t value of milliseconds
-pin - write/read to an I/O location
-pinmode - set the mode of an I/O location
-save - write all set parameters in RAM to EEPROM/Flash
-write - write to an address in EEPROM/Flash
-read - read an address in EEPROM/Flash
-help - display this list
-reset - soft-reset system
-version - spit out the firmware version
-interactive - enter interactive typing mode with a particular node
-key - send a key to a particular node
-modkey - send a mod+key to a particular node
-mouse - send a mouse movement to a particular node
-line - send a line to type to a particular node
-event - register a (pre-baked only) event on a particular node
+send - <int address> <byte data> - send a specific packet defined
+scan - <no args> display all beacons received
+beacon - <int beaconing rate> set beaconing rate, 0 is "off"
+pair - <no args> initiate a pairing sequence
+receive - <no args> display the received stream of packets in order (with time if possible)
+clear - <no args> clear all buffers
+set - <string parameter name> <int parameter value> - set parameter value
+get - <string parameter name> get parameter value
+radio - <bool radio state> start/stop the radio
+sleep - <int milliseconds to sleep> allow the system to sleep for a uint32_t value of milliseconds
+pin - <int pin number> <bool pin state> write/read to an I/O location
+pinmode - <int pin number> <string pin mode> set the mode of an I/O location
+save - <no args> write all set parameters in RAM to EEPROM/Flash
+write - <int address> <int value> write to an address in EEPROM/Flash
+read - <int address> read an address in EEPROM/Flash
+help - <no args> display this list
+reset - <no args> soft-reset system
+version - <no args> spit out the firmware version
+interactive - <no args> enter interactive typing mode with a particular node (### to exit)
+key - <int address> <int key> send a key to a particular node
+modkey - <int address> <int mod key> <int key> send a mod+key to a particular node
+mouse - <int address> <int x> <int y> <int rate> send a mouse movement to a particular node
+line - <int address> <string line> send a line to type to a particular node
+event - <int address> <event type> <event slot> <callback id> register a (pre-baked only) event on a particular node
 */
 
 #define kCONSOLE_SEND 			"send"
